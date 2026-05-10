@@ -1,0 +1,27 @@
+<resources>
+    <string name="app_name">78HAM</string>
+    <string name="login">登录</string>
+    <string name="username">用户名</string>
+    <string name="password">密码</string>
+    <string name="server_address">服务器地址</string>
+    <string name="server_port">端口</string>
+    <string name="ptt_talk">按住对讲</string>
+    <string name="ptt_talking">正在讲话…</string>
+    <string name="settings">设置</string>
+    <string name="logout">退出登录</string>
+    <string name="device_info">设备信息</string>
+    <string name="callsign">呼号</string>
+    <string name="dmr_id">DMR ID</string>
+    <string name="codec_format">编码格式</string>
+    <string name="codec_g711">G711</string>
+    <string name="codec_opus">Opus</string>
+    <string name="volume">音量</string>
+    <string name="ptt_key">PTT按键设置</string>
+    <string name="screen_off_ptt">息屏启麦</string>
+    <string name="keep_alive">保持连接</string>
+    <string name="connected">已连接</string>
+    <string name="disconnected">未连接</string>
+    <string name="connecting">连接中…</string>
+    <string name="save">保存</string>
+    <string name="cancel">取消</string>
+</resources>

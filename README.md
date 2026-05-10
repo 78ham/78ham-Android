@@ -1,10 +1,13 @@
 # 78HAM Android Client
 
-78HAM 对讲机客户端 — 基于 Android 的业余无线电网络对讲应用。
+78HAM 对讲机客户端 — 基于 Android 的业余无线电网络对讲应用，适配对讲 D12 按键。
+
+基于 [hicaoc/nrllink](https://github.com/hicaoc/nrllink) 和 [hicaoc/nrllink-mp](https://github.com/hicaoc/nrllink-mp) 开发。
 
 ## 功能特性
 
 - **PTT 对讲** — 按住说话，支持息屏启麦
+- **对讲 D12 按键适配** — 原生支持 D12 对讲机实体按键（PTT、MENU、UP、DOWN、OK）
 - **语音编码** — 支持 G711 编码格式
 - **频道/房间** — 支持多房间切换
 - **PTT 按键自定义** — 可映射实体按键为 PTT
@@ -82,6 +85,11 @@ app/src/main/java/com/ham78/app/
 | `WAKE_LOCK` | 息屏保持连接 |
 | `RECEIVE_BOOT_COMPLETED` | 开机自启 |
 | `POST_NOTIFICATIONS` | 通知提醒 |
+
+## 参考项目
+
+- [hicaoc/nrllink](https://github.com/hicaoc/nrllink) — NRLLink 服务端
+- [hicaoc/nrllink-mp](https://github.com/hicaoc/nrllink-mp) — NRLLink 微信小程序客户端
 
 ## License
 

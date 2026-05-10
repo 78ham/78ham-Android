@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.ham78.app.network.ApiClient
+import com.ham78.app.ui.theme.*
 import kotlinx.coroutines.*
 
 class LoginActivity : ComponentActivity() {
@@ -42,7 +43,6 @@ class LoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 如果已有保存的凭证，直接跳转 MainActivity（自动登录）
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedUsername = prefs.getString("username", "") ?: ""
         val savedPassword = prefs.getString("password", "") ?: ""
@@ -54,7 +54,6 @@ class LoginActivity : ComponentActivity() {
             return
         }
 
-        // 简单请求麦克风权限
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 100)
@@ -80,7 +79,6 @@ class LoginActivity : ComponentActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        // 权限结果不需要特殊处理，不影响登录流程
     }
 }
 
@@ -105,7 +103,7 @@ fun LoginScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF1976D2))
+            .background(Background)
     ) {
         Column(
             modifier = Modifier
@@ -117,17 +115,17 @@ fun LoginScreen(
             Spacer(modifier = Modifier.height(48.dp))
 
             Text(
-                text = "78HAM对讲",
-                color = Color.White,
-                fontSize = 32.sp,
+                text = "78HAM",
+                color = BrandPurple,
+                fontSize = 40.sp,
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "用户名密码登录",
-                color = Color.White.copy(alpha = 0.7f),
+                text = "业余无线电对讲",
+                color = TextSecondary,
                 fontSize = 14.sp
             )
 
@@ -136,10 +134,17 @@ fun LoginScreen(
             OutlinedTextField(
                 value = serverAddress,
                 onValueChange = { serverAddress = it },
-                label = { Text("服务器") },
-                placeholder = { Text("js.nrlptt.com") },
+                label = { Text("服务器", color = TextSecondary) },
+                placeholder = { Text("js.nrlptt.com", color = TextSecondary.copy(alpha = 0.5f)) },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = BrandPurple,
+                    unfocusedBorderColor = Divider,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    cursorColor = BrandPurple
+                )
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -147,10 +152,17 @@ fun LoginScreen(
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },
-                label = { Text("用户名") },
+                label = { Text("用户名", color = TextSecondary) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = BrandPurple,
+                    unfocusedBorderColor = Divider,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    cursorColor = BrandPurple
+                )
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -158,11 +170,18 @@ fun LoginScreen(
             OutlinedTextField(
                 value = password,
                 onValueChange = { password = it },
-                label = { Text("密码") },
+                label = { Text("密码", color = TextSecondary) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = BrandPurple,
+                    unfocusedBorderColor = Divider,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    cursorColor = BrandPurple
+                )
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -170,7 +189,7 @@ fun LoginScreen(
             if (errorMessage.isNotEmpty()) {
                 Text(
                     text = errorMessage,
-                    color = Color(0xFFFFCDD2),
+                    color = Error,
                     fontSize = 13.sp
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -222,23 +241,29 @@ fun LoginScreen(
                     .fillMaxWidth()
                     .height(52.dp),
                 enabled = !isLoading && username.isNotEmpty() && password.isNotEmpty(),
-                shape = RoundedCornerShape(8.dp)
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = BrandPurple,
+                    contentColor = TextOnPrimary,
+                    disabledContainerColor = BrandPurple.copy(alpha = 0.4f),
+                    disabledContentColor = TextOnPrimary.copy(alpha = 0.5f)
+                )
             ) {
                 if (isLoading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
-                        color = Color.White,
+                        color = TextOnPrimary,
                         strokeWidth = 2.dp
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
-                Text(if (isLoading) "登录中..." else "登录", fontSize = 16.sp)
+                Text(if (isLoading) "登录中..." else "登录", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
             TextButton(onClick = onSkipLogin) {
-                Text("跳过登录", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+                Text("跳过登录", color = TextSecondary, fontSize = 14.sp)
             }
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -246,7 +271,7 @@ fun LoginScreen(
             Text(
                 text = "版本 1.0.0",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.6f)
+                color = TextSecondary.copy(alpha = 0.5f)
             )
 
             Spacer(modifier = Modifier.height(24.dp))

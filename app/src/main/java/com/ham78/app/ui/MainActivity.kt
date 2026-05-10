@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ham78.app.service.TalkService
+import com.ham78.app.ui.theme.*
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -215,7 +216,7 @@ fun MainScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFFF5F5F5))
+            .background(Background)
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
@@ -236,7 +237,7 @@ fun MainScreen(
                             Text(
                                 text = if (isConnected) "已连接" else "未连接",
                                 fontSize = 11.sp,
-                                color = if (isConnected) Color(0xFF4CAF50) else Color.Red
+                                color = if (isConnected) Connected else Disconnected
                             )
                         }
                     }
@@ -248,7 +249,7 @@ fun MainScreen(
                                 talkService.loginAndConnect()
                             }
                         }) {
-                            Icon(Icons.Filled.Call, contentDescription = "连接", tint = Color(0xFF4CAF50))
+                            Icon(Icons.Filled.Call, contentDescription = "连接", tint = Connected)
                         }
                     }
                     IconButton(onClick = {
@@ -268,7 +269,7 @@ fun MainScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { showRoomPicker = true }
-                    .background(Color.White)
+                    .background(Surface)
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
@@ -284,13 +285,13 @@ fun MainScreen(
                     Text(
                         text = "ID: ${if (currentRoom > 0) currentRoom else "--"}  |  在线: $onlineCount",
                         fontSize = 13.sp,
-                        color = Color.Gray
+                        color = TextSecondary
                     )
                 }
                 Text(
                     text = "切换 >",
                     fontSize = 14.sp,
-                    color = Color(0xFF2196F3),
+                    color = BrandPurple,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -315,13 +316,13 @@ fun MainScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color.Red.copy(alpha = 0.1f))
+                        .background(Error.copy(alpha = 0.1f))
                         .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "正在发射...",
-                        color = Color.Red,
+                        color = Error,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -330,13 +331,13 @@ fun MainScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF2196F3).copy(alpha = 0.1f))
+                        .background(BrandPurple.copy(alpha = 0.1f))
                         .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "接收中: $lastCallsign",
-                        color = Color(0xFF2196F3),
+                        color = BrandPurple,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -358,9 +359,9 @@ fun MainScreen(
                         .clip(RoundedCornerShape(32.dp))
                         .background(
                             when {
-                                isTransmitting -> Color.Red
-                                isConnected -> Color(0xFF2196F3)
-                                else -> Color.Gray
+                                isTransmitting -> PttTransmitting
+                                isConnected -> BrandPurple
+                                else -> Disconnected
                             }
                         )
                         .pointerInput(isConnected) {
@@ -391,12 +392,12 @@ fun MainScreen(
                             if (isTransmitting) Icons.Filled.Mic else Icons.Filled.MicOff,
                             contentDescription = "PTT",
                             modifier = Modifier.size(28.dp),
-                            tint = Color.White
+                            tint = TextPrimary
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = if (isTransmitting) "松开停止" else if (isConnected) "按住说话" else "未连接",
-                            color = Color.White,
+                            color = TextPrimary,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -436,12 +437,12 @@ fun ChatBubble(message: ChatMessage) {
                 modifier = Modifier
                     .size(32.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF2196F3)),
+                    .background(BrandPurple),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = message.callsign.firstOrNull()?.toString() ?: "?",
-                    color = Color.White,
+                    color = TextPrimary,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -452,7 +453,7 @@ fun ChatBubble(message: ChatMessage) {
             modifier = Modifier
                 .clip(RoundedCornerShape(12.dp))
                 .background(
-                    if (message.isSelf) Color(0xFF2196F3) else Color.White
+                    if (message.isSelf) BrandPurple else SurfaceElevated
                 )
                 .padding(12.dp)
                 .widthIn(max = 250.dp)
@@ -462,20 +463,20 @@ fun ChatBubble(message: ChatMessage) {
                     text = "${message.callsign}-${message.ssid}",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.Gray
+                    color = TextSecondary
                 )
             }
 
             Text(
                 text = message.content,
-                color = if (message.isSelf) Color.White else Color.Black,
+                color = if (message.isSelf) TextPrimary else TextSecondary,
                 fontSize = 14.sp
             )
 
             Text(
                 text = message.timestamp,
                 fontSize = 10.sp,
-                color = if (message.isSelf) Color.White.copy(alpha = 0.7f) else Color.Gray
+                color = if (message.isSelf) TextPrimary.copy(alpha = 0.7f) else TextSecondary
             )
         }
     }
@@ -505,7 +506,7 @@ fun RoomPickerDialog(
                                 .fillMaxWidth()
                                 .clickable { onRoomSelected(room.id) }
                                 .background(
-                                    if (isSelected) Color(0xFF2196F3).copy(alpha = 0.1f)
+                                    if (isSelected) BrandPurple.copy(alpha = 0.1f)
                                     else Color.Transparent
                                 )
                                 .padding(horizontal = 12.dp, vertical = 14.dp),
@@ -517,25 +518,25 @@ fun RoomPickerDialog(
                                     text = room.name,
                                     fontSize = 16.sp,
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isSelected) Color(0xFF2196F3) else Color.Black
+                                    color = if (isSelected) BrandPurple else TextPrimary
                                 )
                                 Text(
                                     text = "ID: ${room.id}  |  成员: ${room.memberCount}",
                                     fontSize = 12.sp,
-                                    color = Color.Gray
+                                    color = TextSecondary
                                 )
                             }
                             if (isSelected) {
                                 Text(
                                     text = "当前",
                                     fontSize = 13.sp,
-                                    color = Color(0xFF2196F3),
+                                    color = BrandPurple,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
                         }
                         if (index < rooms.size - 1) {
-                            Divider(color = Color(0xFFEEEEEE), thickness = 0.5.dp)
+                            Divider(color = Divider, thickness = 0.5.dp)
                         }
                     }
                 }

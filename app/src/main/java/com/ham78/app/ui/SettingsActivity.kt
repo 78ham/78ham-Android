@@ -6,6 +6,7 @@ import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import com.ham78.app.data.AudioCodec
 import com.ham78.app.data.SettingsRepository
 import com.ham78.app.data.UserSettings
+import com.ham78.app.ui.theme.*
 
 class SettingsActivity : ComponentActivity() {
     
@@ -110,6 +112,7 @@ fun SettingsScreen(
     }
     
     Scaffold(
+        containerColor = Background,
         topBar = {
             TopAppBar(
                 title = { Text("设置") },
@@ -117,7 +120,11 @@ fun SettingsScreen(
                     TextButton(onClick = onBack) {
                         Text("返回", fontSize = 16.sp)
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Surface,
+                    titleContentColor = TextPrimary
+                )
             )
         }
     ) { paddingValues ->
@@ -155,7 +162,7 @@ fun SettingsScreen(
                 Text(
                     text = "使用 nrl 小程序注册的用户名和密码登录",
                     fontSize = 12.sp,
-                    color = Color.Gray,
+                    color = TextSecondary,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 
@@ -189,7 +196,7 @@ fun SettingsScreen(
                             Text(
                                 text = "呼号",
                                 fontSize = 12.sp,
-                                color = Color.Gray
+                                color = TextSecondary
                             )
                             Text(
                                 text = callsign,
@@ -203,7 +210,7 @@ fun SettingsScreen(
                             Text(
                                 text = "DMR ID",
                                 fontSize = 12.sp,
-                                color = Color.Gray
+                                color = TextSecondary
                             )
                             Text(
                                 text = dmrId.toString(),
@@ -218,7 +225,7 @@ fun SettingsScreen(
                     Text(
                         text = "登录后将自动获取您的呼号和 DMR ID",
                         fontSize = 14.sp,
-                        color = Color.Gray,
+                        color = TextSecondary,
                         modifier = Modifier.padding(vertical = 16.dp)
                     )
                 }
@@ -236,14 +243,14 @@ fun SettingsScreen(
                 Text(
                     text = "协议帧中的 SSID 字段（offset 30），即呼号后缀数字。修改后需重新连接生效。",
                     fontSize = 12.sp,
-                    color = Color.Gray
+                    color = TextSecondary
                 )
             }
             
             // 音频设置
             SettingsSection(title = "音频设置") {
                 // 编码格式
-                Text("编码格式", fontSize = 14.sp, color = Color.Gray)
+                Text("编码格式", fontSize = 14.sp, color = TextSecondary)
                 Row {
                     RadioButton(
                         selected = codec == AudioCodec.G711,
@@ -263,7 +270,7 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 
                 // 音量
-                Text("音量: $volume%", fontSize = 14.sp, color = Color.Gray)
+                Text("音量: $volume%", fontSize = 14.sp, color = TextSecondary)
                 Slider(
                     value = volume.toFloat(),
                     onValueChange = { volume = it.toInt() },
@@ -304,7 +311,7 @@ fun SettingsScreen(
                 Text(
                     text = "PTT按键码",
                     fontSize = 14.sp,
-                    color = Color.Gray
+                    color = TextSecondary
                 )
                 
                 Row(
@@ -337,7 +344,7 @@ fun SettingsScreen(
                 Text(
                     text = "常用: 24(音量+) 25(音量-) 262(专用PTT)",
                     fontSize = 12.sp,
-                    color = Color.Gray
+                    color = TextSecondary
                 )
             }
             
@@ -367,9 +374,13 @@ fun SettingsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
-                shape = RoundedCornerShape(28.dp)
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = BrandPurple,
+                    contentColor = TextOnPrimary
+                )
             ) {
-                Text("保存设置", fontSize = 18.sp)
+                Text("保存设置", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
             
             Spacer(modifier = Modifier.height(32.dp))
@@ -395,7 +406,8 @@ fun SettingsSection(
         
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp)
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = Surface)
         ) {
             Column(
                 modifier = Modifier

@@ -273,8 +273,8 @@ class TalkService : Service() {
             deviceProfile.broadcastActions.forEach { action ->
                 try {
                     val filter = android.content.IntentFilter(action)
-                    registerReceiver(object : BroadcastReceiver() {
-                        override fun onReceive(ctx: Context?, intent: Intent?) {
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(ctx: Context, intent: Intent?) {
                             when (intent?.action) {
                                 "android.intent.action.PTT.down" -> {
                                     Log.d(TAG, "Device broadcast PTT down")
@@ -292,7 +292,8 @@ class TalkService : Service() {
                                 }
                             }
                         }
-                    }, filter)
+                    }
+                    registerReceiver(receiver, filter)
                     Log.i(TAG, "Registered broadcast: $action")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to register broadcast: $action", e)

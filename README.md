@@ -103,7 +103,22 @@ adb shell getevent -lt | grep -i "EV_KEY"
 adb logcat -s PttController:* ActivityManager:* | grep -iE "ptt|key"
 ```
 
-**方法三：导出设备信息**
+**方法三：导出音频状态变化**（对比 PTT 前后）
+```bash
+# 1. 先导出空闲状态
+adb shell dumpsys audio > audio_before.txt
+# 2. 按住 PTT 不放，等 2 秒后导出
+adb shell dumpsys audio > audio_during.txt
+# 3. 松开 PTT，等 2 秒后导出
+adb shell dumpsys audio > audio_after.txt
+```
+
+**方法四：导出完整日志**
+```bash
+adb shell logcat -d > logcat_full.txt
+```
+
+**方法五：导出设备信息**
 ```bash
 adb shell getprop ro.product.model
 adb shell getprop ro.product.manufacturer

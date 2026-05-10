@@ -95,6 +95,7 @@ class PttController(private val context: Context) {
         when (event.keyCode) {
             KEYCODE_PTT,               // 0x106
             KEYCODE_D12_PTT,           // 0x107
+            113,                       // KEY_MUTE (D12 PTT)
             368,                       // KEY_HP (直接映射)
             270,                       // KEY_HP2
             531,                       // KEY_PTT_ON

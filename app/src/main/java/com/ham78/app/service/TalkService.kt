@@ -24,6 +24,7 @@ import com.ham78.app.network.UdpClient
 import com.ham78.app.protocol.ProtocolManager
 import com.ham78.app.protocol.ProtocolType
 import com.ham78.app.ptt.PttController
+import com.ham78.app.ptt.DeviceKeyProfiles
 import com.ham78.app.ptt.PttButtonReceiver
 import com.ham78.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -231,17 +232,28 @@ class TalkService : Service() {
     
     private fun setupPttController() {
         val settings = settingsRepository.loadSettings()
-        
+
+        // 自动识别设备按键方案
+        val deviceProfile = DeviceKeyProfiles.detect()
+        val effectivePttKey = if (settings.pttKeyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
+            // 用户未自定义，使用设备方案
+            deviceProfile.pttKeyCode
+        } else {
+            settings.pttKeyCode
+        }
+
+        Log.i(TAG, "Device profile: ${deviceProfile.name}, PTT keyCode: 0x${effectivePttKey.toString(16)}, broadcast: ${deviceProfile.useBroadcastPtt}")
+
         pttController.initialize(
             listener = object : PttController.PttListener {
                 override fun onPttPressed() {
                     startTransmitting()
                 }
-                
+
                 override fun onPttReleased() {
                     stopTransmitting()
                 }
-                
+
                 override fun onPttLongPress() {
                     Log.d(TAG, "PTT long press detected")
                     if (!_isLoggedIn.value) {
@@ -251,9 +263,41 @@ class TalkService : Service() {
                     }
                 }
             },
-            pttKey = settings.pttKeyCode,
+            pttKey = effectivePttKey,
             screenOffEnabled = settings.screenOffPtt
         )
+
+        // 注册设备方案中的额外广播（如 MTK PTT 广播）
+        if (deviceProfile.useBroadcastPtt) {
+            deviceProfile.broadcastActions.forEach { action ->
+                try {
+                    val filter = android.content.IntentFilter(action)
+                    registerReceiver(object : BroadcastReceiver() {
+                        override fun onReceive(ctx: Context?, intent: Intent?) {
+                            when (intent?.action) {
+                                "android.intent.action.PTT.down" -> {
+                                    Log.d(TAG, "Device broadcast PTT down")
+                                    pttController.onKeyEvent(android.view.KeyEvent(
+                                        android.view.KeyEvent.ACTION_DOWN,
+                                        deviceProfile.pttKeyCode
+                                    ))
+                                }
+                                "android.intent.action.PTT.up" -> {
+                                    Log.d(TAG, "Device broadcast PTT up")
+                                    pttController.onKeyEvent(android.view.KeyEvent(
+                                        android.view.KeyEvent.ACTION_UP,
+                                        deviceProfile.pttKeyCode
+                                    ))
+                                }
+                            }
+                        }
+                    }, filter)
+                    Log.i(TAG, "Registered broadcast: $action")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to register broadcast: $action", e)
+                }
+            }
+        }
     }
     
     private fun setupPttButtonReceiver() {

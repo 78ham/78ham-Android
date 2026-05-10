@@ -153,7 +153,7 @@ fun SettingsScreen(
             // 账户登录信息
             SettingsSection(title = "账户登录") {
                 Text(
-                    text = "使用 78HAM 网站注册的用户名和密码登录",
+                    text = "使用 nrl 小程序注册的用户名和密码登录",
                     fontSize = 12.sp,
                     color = Color.Gray,
                     modifier = Modifier.padding(bottom = 8.dp)

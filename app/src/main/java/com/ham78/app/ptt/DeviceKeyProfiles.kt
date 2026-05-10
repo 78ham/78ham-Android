@@ -20,7 +20,7 @@ object DeviceKeyProfiles {
     val profiles = listOf(
         // 对讲 D12
         DeviceProfile(
-            name = "对讲 D12",
+            name = "和对讲 D12",
             match = { Build.MODEL.contains("D12", ignoreCase = true) ||
                      Build.MODEL.contains("Interphone D12", ignoreCase = true) },
             pttKeyCode = 113,  // KEY_MUTE, 通过 sendevent /dev/input/event2 1 113 1/0

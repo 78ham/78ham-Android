@@ -22,7 +22,7 @@ class SettingsRepository(context: Context) {
             serverPort = prefs.getInt(KEY_SERVER_PORT, 60050),
             dmrId = prefs.getInt(KEY_DMR_ID, 0),
             callsign = prefs.getString(KEY_CALLSIGN, "") ?: "",
-            ssid = prefs.getInt(KEY_SSID, 100),
+            ssid = prefs.getInt(KEY_SSID, 78),
             codec = AudioCodec.valueOf(prefs.getString(KEY_CODEC, AudioCodec.G711.name) ?: AudioCodec.G711.name),
             volume = prefs.getInt(KEY_VOLUME, 100),
             screenOffPtt = prefs.getBoolean(KEY_SCREEN_OFF_PTT, true),

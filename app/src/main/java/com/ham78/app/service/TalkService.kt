@@ -408,7 +408,7 @@ class TalkService : Service() {
         
         val device = currentDeviceData
         // 用户设置的 SSID 优先（非0时），否则用 API 返回的值，最终 fallback 100
-        val ssid = if (settings.ssid != 0) settings.ssid else (device?.ssid ?: 100)
+        val ssid = if (settings.ssid != 0) settings.ssid else (device?.ssid ?: 78)
         val devModel = device?.devModel ?: 101  // Android 默认设备型号 101
         val dmrId = device?.dmrId ?: userInfo.dmrId
 
@@ -454,7 +454,7 @@ class TalkService : Service() {
         serviceScope.launch {
             try {
                 if (ApiClient.token.isNotEmpty()) {
-                    val ssid = currentDeviceData?.ssid ?: 100
+                    val ssid = currentDeviceData?.ssid ?: 78
                     val deviceResult = ApiClient.getDevice(settings.serverAddress, userInfo.callsign, ssid)
                     val device = deviceResult.getOrNull()
                     if (device != null) {
@@ -623,7 +623,7 @@ class TalkService : Service() {
         val userInfo = currentUserInfo ?: return
 
         try {
-            val ssid = currentDeviceData?.ssid ?: 100
+            val ssid = currentDeviceData?.ssid ?: 78
             val deviceResult = ApiClient.getDevice(settings.serverAddress, userInfo.callsign, ssid)
             deviceResult.fold(
                 onSuccess = { device ->

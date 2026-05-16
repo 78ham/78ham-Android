@@ -112,7 +112,7 @@ class ConfigManager(private val context: Context) {
             serverPort = prefs.getInt("serverPort", 60050),
             dmrId = prefs.getInt("dmrId", 0),
             callsign = prefs.getString("callsign", "") ?: "",
-            ssid = prefs.getInt("ssid", 100),
+            ssid = prefs.getInt("ssid", 78),
             codec = if (prefs.getString("codec", "G711") == "OPUS") AudioCodec.OPUS else AudioCodec.G711,
             volume = prefs.getInt("volume", 100),
             screenOffPtt = prefs.getBoolean("screenOffPtt", true),
@@ -177,7 +177,7 @@ data class UserSettings(
     val serverPort: Int = 60050,
     val dmrId: Int = 0,
     val callsign: String = "",
-    val ssid: Int = 100,                 // 设备 SSID（呼号后缀，协议帧 offset 30）
+    val ssid: Int = 78,                 // 设备 SSID（呼号后缀，协议帧 offset 30）
     val codec: AudioCodec = AudioCodec.G711,
     val volume: Int = 100,
     val screenOffPtt: Boolean = true,

@@ -358,7 +358,7 @@ fun SettingsScreen(
                         serverPort = serverPort.toIntOrNull() ?: 60050,
                         dmrId = dmrId, // 保持原有值
                         callsign = callsign, // 保持原有值
-                        ssid = ssid.toIntOrNull() ?: 100,
+                        ssid = ssid.toIntOrNull() ?: 78,
                         codec = codec,
                         volume = volume,
                         screenOffPtt = screenOffPtt,

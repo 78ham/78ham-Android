@@ -42,7 +42,7 @@ class UdpClient {
 
     private var dmrId: Int = 0
     private var callsign: String = ""
-    private var ssid: Int = 100
+    private var ssid: Int = 78
     private var devModel: Int = 101  // Android 默认设备型号 101
 
     private var lastPacketTime = 0L
@@ -57,7 +57,7 @@ class UdpClient {
 
     var packetListener: PacketListener? = null
 
-    fun connect(serverHost: String, port: Int, id: Int, call: String, ssidVal: Int = 100, devModelVal: Int = 101): Boolean {
+    fun connect(serverHost: String, port: Int, id: Int, call: String, ssidVal: Int = 78, devModelVal: Int = 101): Boolean {
         return try {
             dmrId = id
             callsign = call

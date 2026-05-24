@@ -112,7 +112,7 @@ class ConfigManager(private val context: Context) {
             serverPort = prefs.getInt("serverPort", 60050),
             dmrId = prefs.getInt("dmrId", 0),
             callsign = prefs.getString("callsign", "") ?: "",
-            ssid = prefs.getInt("ssid", 78),
+            ssid = prefs.getInt("ssid", 179),
             codec = if (prefs.getString("codec", "G711") == "OPUS") AudioCodec.OPUS else AudioCodec.G711,
             volume = prefs.getInt("volume", 100),
             screenOffPtt = prefs.getBoolean("screenOffPtt", true),
@@ -177,12 +177,23 @@ data class UserSettings(
     val serverPort: Int = 60050,
     val dmrId: Int = 0,
     val callsign: String = "",
-    val ssid: Int = 78,                 // 设备 SSID（呼号后缀，协议帧 offset 30）
+    val ssid: Int = 179,                // 设备 SSID（呼号后缀，协议帧 offset 30），默认 179
     val codec: AudioCodec = AudioCodec.G711,
     val volume: Int = 100,
     val screenOffPtt: Boolean = true,
     val pttKeyCode: Int = android.view.KeyEvent.KEYCODE_VOLUME_UP,
-    val autoConnect: Boolean = false     // 默认不自动连接，等配置好账号
+    val autoConnect: Boolean = false,    // 默认不自动连接，等配置好账号
+    val servers: List<ServerConfig> = emptyList()  // 多服务器配置
+)
+
+data class ServerConfig(
+    val id: String = "",                // 唯一标识
+    val name: String = "",              // 显示名称
+    val host: String = "js.nrlptt.com", // 服务器地址
+    val port: Int = 60050,              // 端口
+    val username: String = "",          // 用户名
+    val password: String = "",          // 密码
+    val autoConnect: Boolean = false    // 自动连接
 )
 
 enum class AudioCodec {

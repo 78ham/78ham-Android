@@ -17,13 +17,16 @@ import androidx.core.app.NotificationCompat
 import com.ham78.app.R
 import com.ham78.app.audio.AudioManager
 import com.ham78.app.data.AudioCodec
+import com.ham78.app.data.ServerConfig
 import com.ham78.app.data.SettingsRepository
-import com.ham78.app.network.ConnectionState
+import com.ham78.app.location.LocationManager
 import com.ham78.app.network.ApiClient
+import com.ham78.app.network.ConnectionState
+import com.ham78.app.network.MessageStore
+import com.ham78.app.network.MultiServerManager
 import com.ham78.app.network.Nrl21Protocol
+import com.ham78.app.network.ServerConnection
 import com.ham78.app.network.UdpClient
-import com.ham78.app.protocol.ProtocolManager
-import com.ham78.app.protocol.ProtocolType
 import com.ham78.app.ptt.PttController
 import com.ham78.app.ptt.DeviceKeyProfiles
 import com.ham78.app.ptt.PttButtonReceiver
@@ -33,132 +36,182 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Job
+import java.util.UUID
 
 /**
- * 对讲前台服务
- * 保持应用在后台运行，处理对讲功能
- * 
- * 流程：
- * 1. HTTP 登录获取用户信息和 Token
- * 2. 使用获取的 DMR ID 和呼号连接 UDP 语音服务
- * 3. 发送心跳包维持连接
+ * 对讲前台服务（多服务器版）
+ * 支持同时连接多个服务器，文本消息收发，位置上传
  */
 class TalkService : Service() {
-    
+
     companion object {
         private const val TAG = "TalkService"
         private const val NOTIFICATION_CHANNEL_ID = "ham78_talk_channel"
         private const val NOTIFICATION_ID = 1
         private const val SERVICE_NAME = "78HAM 对讲服务"
-        
+
         @Volatile
         var isRunning = false
     }
-    
+
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
+
     private lateinit var settingsRepository: SettingsRepository
-    private lateinit var udpClient: UdpClient
-    private lateinit var audioManager: AudioManager
     private lateinit var pttController: PttController
-    private lateinit var protocolManager: ProtocolManager
-    
-    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
-    
-    private val _lastReceivedCallsign = MutableStateFlow("")
-    val lastReceivedCallsign: StateFlow<String> = _lastReceivedCallsign.asStateFlow()
-    
+    private lateinit var locationManager: LocationManager
+    private lateinit var multiServerManager: MultiServerManager
+    private lateinit var messageStore: MessageStore
+
+    // 状态暴露
+    private val _serverConnections = MutableStateFlow<List<ServerConnection>>(emptyList())
+    val serverConnections: StateFlow<List<ServerConnection>> = _serverConnections.asStateFlow()
+
+    val activeServerId: StateFlow<String> get() = multiServerManager.activeServerId
+
     private val _isLoggedIn = MutableStateFlow(false)
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
 
     private val _receivedMessages = MutableSharedFlow<VoiceMessage>(extraBufferCapacity = 64)
     val receivedMessages: SharedFlow<VoiceMessage> = _receivedMessages
 
-    private val _roomList = MutableStateFlow<List<ApiClient.RoomInfo>>(emptyList())
-    val roomList: StateFlow<List<ApiClient.RoomInfo>> = _roomList.asStateFlow()
+    // 文本消息
+    val textMessages: StateFlow<List<MessageStore.TextMessage>> get() = messageStore.allMessages
 
-    private val _currentRoomId = MutableStateFlow(0)
-    val currentRoomId: StateFlow<Int> = _currentRoomId.asStateFlow()
-
-    private val _onlineCount = MutableStateFlow(0)
-    val onlineCount: StateFlow<Int> = _onlineCount.asStateFlow()
-
-    private val _currentGroupName = MutableStateFlow("")
-    val currentGroupName: StateFlow<String> = _currentGroupName.asStateFlow()
-
-    private var refreshJob: Job? = null
-    data class VoiceMessage(
-        val callsign: String,
-        val ssid: Int,
-        val content: String,
-        val timestamp: String,
-        val type: Int
-    )
-
-    private var loginToken: String? = null
-    private var currentUserInfo: ApiClient.UserInfo? = null
-    private var currentDeviceData: ApiClient.DeviceData? = null
-    
     inner class LocalBinder : Binder() {
         fun getService(): TalkService = this@TalkService
     }
-    
+
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
 
         settingsRepository = SettingsRepository(this)
-        udpClient = UdpClient()
-        audioManager = AudioManager(this, udpClient)
-        pttController = PttController(this)
-        protocolManager = ProtocolManager()
+        locationManager = LocationManager(this)
+        messageStore = MessageStore.getInstance()
 
-        setupNetworkListener()
+        // 创建多服务器管理器，提供 AudioManager 工厂
+        multiServerManager = MultiServerManager { udpClient ->
+            AudioManager(this, udpClient)
+        }
+
+        // 设置消息回调
+        multiServerManager.onTextMessageReceived = { serverId, callsign, ssid, content, timestamp ->
+            val serverName = multiServerManager.serverConnections.value
+                .find { it.serverId == serverId }?.name ?: serverId
+
+            // 根据内容判断消息类型
+            val msgType = when {
+                content.startsWith("[loc]") -> MessageStore.MessageType.LOCATION
+                content.startsWith("[语音]") -> MessageStore.MessageType.VOICE
+                else -> MessageStore.MessageType.TEXT
+            }
+
+            val textContent = if (content.startsWith("[loc]")) {
+                "📍 位置: ${content.removePrefix("[loc]")}"
+            } else {
+                content
+            }
+
+            messageStore.addMessage(
+                MessageStore.TextMessage(
+                    id = UUID.randomUUID().toString(),
+                    serverId = serverId,
+                    serverName = serverName,
+                    callsign = callsign,
+                    ssid = ssid,
+                    content = textContent,
+                    timestamp = timestamp,
+                    timestampMs = System.currentTimeMillis(),
+                    isSelf = false,
+                    type = msgType
+                )
+            )
+        }
+
+        multiServerManager.onVoiceReceived = { serverId, callsign, ssid ->
+            val serverName = multiServerManager.serverConnections.value
+                .find { it.serverId == serverId }?.name ?: serverId
+
+            val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+
+            messageStore.addMessage(
+                MessageStore.TextMessage(
+                    id = UUID.randomUUID().toString(),
+                    serverId = serverId,
+                    serverName = serverName,
+                    callsign = callsign,
+                    ssid = ssid,
+                    content = "[语音]",
+                    timestamp = timestamp,
+                    timestampMs = System.currentTimeMillis(),
+                    isSelf = false,
+                    type = MessageStore.MessageType.VOICE
+                )
+            )
+
+            serviceScope.launch {
+                _receivedMessages.emit(VoiceMessage(callsign, ssid, "[语音]", timestamp, 1))
+            }
+        }
+
+        // 监听多服务器状态
+        serviceScope.launch {
+            multiServerManager.serverConnections.collect { connections ->
+                _serverConnections.value = connections
+                _isLoggedIn.value = connections.any { it.isLoggedIn }
+                updateNotification(buildNotificationText(connections))
+            }
+        }
+
         setupPttController()
         setupPttButtonReceiver()
         createNotificationChannel()
     }
-    
+
     override fun onBind(intent: Intent): IBinder {
         return binder
     }
-    
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "Service started")
-        
         startForeground(NOTIFICATION_ID, createNotification())
         isRunning = true
-        
-        // 自动连接（如果有保存的用户信息）
+
+        // 自动连接保存的服务器
         val settings = settingsRepository.loadSettings()
         if (settings.autoConnect && settings.username.isNotEmpty() && settings.password.isNotEmpty()) {
             serviceScope.launch {
-                loginAndConnect()
+                val serverConfig = ServerConfig(
+                    id = "${settings.serverAddress}:${settings.serverPort}",
+                    name = settings.serverAddress,
+                    host = settings.serverAddress,
+                    port = settings.serverPort,
+                    username = settings.username,
+                    password = settings.password,
+                    autoConnect = true
+                )
+                connectToServer(serverConfig)
             }
         }
-        
+
         return START_STICKY
     }
-    
+
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
 
-        disconnect()
-        audioManager.release()
+        multiServerManager.release()
         pttController.release()
-        udpClient.disconnect()
         serviceScope.cancel()
 
         PttButtonReceiver.listener = null
@@ -166,85 +219,180 @@ class TalkService : Service() {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
             val componentName = android.content.ComponentName(this, PttButtonReceiver::class.java)
             audioManager.unregisterMediaButtonEventReceiver(componentName)
-            Log.d(TAG, "Media button receiver unregistered")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to unregister media button receiver", e)
         }
 
         isRunning = false
     }
-    
-    private fun setupNetworkListener() {
-        udpClient.packetListener = object : UdpClient.PacketListener {
-            override fun onPacketReceived(packet: Nrl21Protocol.Packet) {
-                serviceScope.launch {
-                    _connectionState.value = ConnectionState.CONNECTED
-                    
-                    when (packet.type) {
-                        Nrl21Protocol.TYPE_VOICE, Nrl21Protocol.TYPE_OPUS -> {
-                            audioManager.handleReceivedAudio(packet.data, packet.type, packet.callSign)
-                            _lastReceivedCallsign.value = packet.callSign
 
-                            val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-                                .format(java.util.Date())
-                            _receivedMessages.emit(
-                                VoiceMessage(
-                                    callsign = packet.callSign,
-                                    ssid = packet.ssid,
-                                    content = "[语音]",
-                                    timestamp = timestamp,
-                                    type = packet.type
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-            
-            override fun onError(error: String) {
-                Log.e(TAG, "Network error: $error")
-                updateNotification("网络错误: $error")
-            }
-            
-            override fun onConnectionLost() {
-                Log.w(TAG, "Connection lost, attempting to reconnect...")
-                _connectionState.value = ConnectionState.DISCONNECTED
-                updateNotification("连接已断开，正在重新连接...")
-                
-                serviceScope.launch {
-                    if (_isLoggedIn.value && currentUserInfo != null) {
-                        connect()
-                    }
-                }
-            }
-        }
-        
-        serviceScope.launch {
-            udpClient.connectionState.collect { state ->
-                _connectionState.value = state
-                when (state) {
-                    ConnectionState.CONNECTED -> updateNotification("已连接 - ${currentUserInfo?.callsign ?: "未知"}")
-                    ConnectionState.CONNECTING -> updateNotification("连接中...")
-                    ConnectionState.DISCONNECTED -> updateNotification("未连接")
-                }
-            }
+    // ============== 多服务器操作 ==============
+
+    suspend fun connectToServer(config: ServerConfig): Boolean {
+        return multiServerManager.connectToServer(config)
+    }
+
+    fun disconnectFromServer(serverId: String) {
+        multiServerManager.disconnectFromServer(serverId)
+    }
+
+    fun switchActiveServer(serverId: String) {
+        multiServerManager.switchActiveServer(serverId)
+    }
+
+    fun getServerConnections(): List<ServerConnection> = _serverConnections.value
+
+    // ============== 频道操作 ==============
+
+    fun joinRoom(serverId: String, roomId: Int) {
+        multiServerManager.joinRoom(serverId, roomId)
+    }
+
+    suspend fun loadRoomList(serverId: String): List<ApiClient.RoomInfo> {
+        return multiServerManager.loadRoomList(serverId)
+    }
+
+    // ============== 语音操作 ==============
+
+    fun startTransmitting(): Boolean {
+        return multiServerManager.startTransmitting()
+    }
+
+    fun stopTransmitting() {
+        multiServerManager.stopTransmitting()
+    }
+
+    fun isTransmitting(): Boolean = multiServerManager.isTransmitting()
+    fun isReceiving(): Boolean = multiServerManager.isReceiving()
+
+    fun handleKeyEvent(event: android.view.KeyEvent): Boolean {
+        return pttController.onKeyEvent(event)
+    }
+
+    // ============== 文本消息 ==============
+
+    /**
+     * 发送文本消息到指定服务器
+     */
+    fun sendTextMessage(serverId: String, text: String) {
+        val connection = multiServerManager.getConnection(serverId) ?: return
+        val userInfo = connection.userInfo ?: return
+        val deviceData = connection.deviceData
+
+        val ssid = deviceData?.ssid ?: 179
+        val dmrId = deviceData?.dmrId ?: userInfo.dmrId
+
+        multiServerManager.sendTextMessage(serverId, userInfo.callsign, text, ssid, dmrId)
+
+        // 添加到消息存储
+        val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+
+        messageStore.addMessage(
+            MessageStore.TextMessage(
+                id = UUID.randomUUID().toString(),
+                serverId = serverId,
+                serverName = serverName,
+                callsign = userInfo.callsign,
+                ssid = ssid,
+                content = text,
+                timestamp = timestamp,
+                timestampMs = System.currentTimeMillis(),
+                isSelf = true,
+                type = MessageStore.MessageType.TEXT
+            )
+        )
+    }
+
+    /**
+     * 发送文本到活跃服务器
+     */
+    fun sendTextMessageToActive(text: String) {
+        val activeId = multiServerManager.activeServerId.value
+        if (activeId.isNotEmpty()) {
+            sendTextMessage(activeId, text)
         }
     }
-    
+
+    // ============== 位置上传 ==============
+
+    /**
+     * 上传当前位置到指定服务器
+     */
+    suspend fun uploadLocation(serverId: String): Boolean {
+        if (!locationManager.hasLocationPermission()) {
+            showToast("请先授予位置权限")
+            return false
+        }
+
+        val locationResult = locationManager.getCurrentLocation()
+        locationResult.fold(
+            onSuccess = { (lat, lng) ->
+                val connection = multiServerManager.getConnection(serverId) ?: return false
+                val userInfo = connection.userInfo ?: return false
+                val deviceData = connection.deviceData
+
+                val ssid = deviceData?.ssid ?: 179
+                val dmrId = deviceData?.dmrId ?: userInfo.dmrId
+
+                multiServerManager.sendLocation(serverId, userInfo.callsign, lat, lng, ssid, dmrId)
+
+                val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
+                val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+
+                messageStore.addMessage(
+                    MessageStore.TextMessage(
+                        id = UUID.randomUUID().toString(),
+                        serverId = serverId,
+                        serverName = serverName,
+                        callsign = userInfo.callsign,
+                        ssid = ssid,
+                        content = "📍 已上传位置: ${"%.4f".format(lat)}, ${"%.4f".format(lng)}",
+                        timestamp = timestamp,
+                        timestampMs = System.currentTimeMillis(),
+                        isSelf = true,
+                        type = MessageStore.MessageType.LOCATION
+                    )
+                )
+
+                showToast("位置已上传")
+                return true
+            },
+            onFailure = { error ->
+                showToast("获取位置失败: ${error.message}")
+                return false
+            }
+        )
+    }
+
+    /**
+     * 上传位置到活跃服务器
+     */
+    suspend fun uploadLocationToActive(): Boolean {
+        val activeId = multiServerManager.activeServerId.value
+        return if (activeId.isNotEmpty()) {
+            uploadLocation(activeId)
+        } else {
+            showToast("没有活跃的服务器连接")
+            false
+        }
+    }
+
+    // ============== 内部方法 ==============
+
     private fun setupPttController() {
         val settings = settingsRepository.loadSettings()
 
-        // 自动识别设备按键方案
         val deviceProfile = DeviceKeyProfiles.detect()
         val effectivePttKey = if (settings.pttKeyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
-            // 用户未自定义，使用设备方案
             deviceProfile.pttKeyCode
         } else {
             settings.pttKeyCode
         }
 
-        Log.i(TAG, "Device profile: ${deviceProfile.name}, PTT keyCode: 0x${effectivePttKey.toString(16)}, broadcast: ${deviceProfile.useBroadcastPtt}")
-
+        pttController = PttController(this)
         pttController.initialize(
             listener = object : PttController.PttListener {
                 override fun onPttPressed() {
@@ -257,18 +405,13 @@ class TalkService : Service() {
 
                 override fun onPttLongPress() {
                     Log.d(TAG, "PTT long press detected")
-                    if (!_isLoggedIn.value) {
-                        serviceScope.launch {
-                            loginAndConnect()
-                        }
-                    }
                 }
             },
             pttKey = effectivePttKey,
             screenOffEnabled = settings.screenOffPtt
         )
 
-        // 注册设备方案中的额外广播（如 MTK PTT 广播）
+        // 注册设备方案中的额外广播
         if (deviceProfile.useBroadcastPtt) {
             deviceProfile.broadcastActions.forEach { action ->
                 try {
@@ -277,14 +420,12 @@ class TalkService : Service() {
                         override fun onReceive(ctx: Context, intent: Intent?) {
                             when (intent?.action) {
                                 "android.intent.action.PTT.down" -> {
-                                    Log.d(TAG, "Device broadcast PTT down")
                                     pttController.onKeyEvent(android.view.KeyEvent(
                                         android.view.KeyEvent.ACTION_DOWN,
                                         deviceProfile.pttKeyCode
                                     ))
                                 }
                                 "android.intent.action.PTT.up" -> {
-                                    Log.d(TAG, "Device broadcast PTT up")
                                     pttController.onKeyEvent(android.view.KeyEvent(
                                         android.view.KeyEvent.ACTION_UP,
                                         deviceProfile.pttKeyCode
@@ -294,14 +435,13 @@ class TalkService : Service() {
                         }
                     }
                     registerReceiver(receiver, filter)
-                    Log.i(TAG, "Registered broadcast: $action")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to register broadcast: $action", e)
                 }
             }
         }
     }
-    
+
     private fun setupPttButtonReceiver() {
         PttButtonReceiver.listener = object : PttButtonReceiver.PttButtonListener {
             override fun onPttButtonPressed() {
@@ -317,236 +457,23 @@ class TalkService : Service() {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
             val componentName = android.content.ComponentName(this, PttButtonReceiver::class.java)
             audioManager.registerMediaButtonEventReceiver(componentName)
-            Log.d(TAG, "Media button receiver registered")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register media button receiver", e)
         }
     }
 
-    /**
-     * 登录并连接
-     * 流程：HTTP 登录 -> 获取用户信息 -> 连接 UDP
-     */
-    suspend fun loginAndConnect(): Boolean = withContext(Dispatchers.IO) {
-        val settings = settingsRepository.loadSettings()
-        
-        if (settings.username.isEmpty() || settings.password.isEmpty()) {
-            showToast("请先设置用户名和密码")
-            return@withContext false
-        }
-        
-        _connectionState.value = ConnectionState.CONNECTING
-        
-        val serverHost = settings.serverAddress
-        val loginResult = ApiClient.login(
-            serverHost = serverHost,
-            username = settings.username,
-            password = settings.password
-        )
-        
-        loginResult.fold(
-            onSuccess = { userInfo ->
-                loginToken = ApiClient.token
-                currentUserInfo = userInfo
-                _isLoggedIn.value = true
-
-                // 获取设备信息以获取真实 ssid/devModel/dmrId
-                try {
-                    val deviceResult = ApiClient.getDevice(serverHost, userInfo.callsign, 100)
-                    currentDeviceData = deviceResult.getOrNull()
-                    if (currentDeviceData != null) {
-                        Log.d(TAG, "Device loaded: ssid=${currentDeviceData!!.ssid}, devModel=${currentDeviceData!!.devModel}, dmrId=${currentDeviceData!!.dmrId}")
-                    } else {
-                        Log.w(TAG, "Failed to load device data, using defaults")
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "获取设备信息失败", e)
-                }
-
-                Log.d(TAG, "Login success: ${userInfo.callsign} (DMR:${userInfo.dmrId}), token=${ApiClient.token}")
-
-                connectUdp(userInfo)
-                startRefreshData()
-                true
-            },
-            onFailure = { error ->
-                Log.e(TAG, "Login failed", error)
-                showToast("登录失败: ${error.message}")
-                _connectionState.value = ConnectionState.DISCONNECTED
-                false
-            }
-        )
-    }
-    
-    /**
-     * 直接连接 UDP（如果已登录过）
-     */
-    fun connect(): Boolean {
-        val settings = settingsRepository.loadSettings()
-        
-        return if (_isLoggedIn.value && currentUserInfo != null) {
-            // 已登录，直接连 UDP
-            connectUdp(currentUserInfo!!)
+    private fun buildNotificationText(connections: List<ServerConnection>): String {
+        if (connections.isEmpty()) return "服务运行中"
+        val online = connections.count { it.isOnline }
+        val total = connections.size
+        val active = connections.find { it.isActive }
+        return if (active != null && active.isOnline) {
+            "已连接 $online/$total - ${active.callsign}"
         } else {
-            // 未登录，先登录
-            serviceScope.launch {
-                loginAndConnect()
-            }
-            true
-        }
-    }
-    
-    private fun connectUdp(userInfo: ApiClient.UserInfo): Boolean {
-        val settings = settingsRepository.loadSettings()
-        
-        // 使用服务器返回的地址，或默认配置
-        val serverHost = userInfo.server ?: settings.serverAddress
-        val port = userInfo.serverPort ?: settings.serverPort
-        
-        audioManager.setCodec(settings.codec)
-        audioManager.setVolume(settings.volume)
-        
-        val device = currentDeviceData
-        // 用户设置的 SSID 优先（非0时），否则用 API 返回的值，最终 fallback 100
-        val ssid = if (settings.ssid != 0) settings.ssid else (device?.ssid ?: 78)
-        val devModel = device?.devModel ?: 101  // Android 默认设备型号 101
-        val dmrId = device?.dmrId ?: userInfo.dmrId
-
-        Log.d(TAG, "connectUdp: ssid=$ssid (settings=${settings.ssid}, device=${device?.ssid}), devModel=$devModel, dmrId=$dmrId")
-
-        val success = udpClient.connect(
-            serverHost = serverHost,
-            port = port,
-            id = dmrId,
-            call = userInfo.callsign,
-            ssidVal = ssid,
-            devModelVal = devModel
-        )
-        
-        if (success) {
-            updateNotification("已连接 - ${userInfo.callsign}")
-        }
-        
-        return success
-    }
-    
-    fun disconnect() {
-        stopRefreshData()
-        udpClient.disconnect()
-        _isLoggedIn.value = false
-        loginToken = null
-        currentUserInfo = null
-        currentDeviceData = null
-        audioManager.stopTransmitting()
-        updateNotification("服务运行中")
-    }
-    
-    fun logout() {
-        disconnect()
-    }
-    
-    fun joinRoom(roomId: Int) {
-        val settings = settingsRepository.loadSettings()
-        val userInfo = currentUserInfo ?: return
-
-        _currentRoomId.value = roomId
-
-        serviceScope.launch {
-            try {
-                if (ApiClient.token.isNotEmpty()) {
-                    val ssid = currentDeviceData?.ssid ?: 78
-                    val deviceResult = ApiClient.getDevice(settings.serverAddress, userInfo.callsign, ssid)
-                    val device = deviceResult.getOrNull()
-                    if (device != null) {
-                        currentDeviceData = device
-                        val result = ApiClient.updateDevice(settings.serverAddress, device, roomId)
-                        result.fold(
-                            onSuccess = {
-                                Log.d(TAG, "切换频道成功: $roomId")
-                                refreshData()
-                            },
-                            onFailure = { e ->
-                                Log.e(TAG, "切换频道失败: ${e.message}")
-                            }
-                        )
-                    } else {
-                        Log.e(TAG, "获取设备信息失败，无法切换频道")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Join room failed: ${e.message}")
-            }
+            "在线: $online/$total 服务器"
         }
     }
 
-    fun loadRoomList() {
-        val settings = settingsRepository.loadSettings()
-
-        Log.d(TAG, "loadRoomList called, ApiClient.token=${ApiClient.token}, isLoggedIn=${_isLoggedIn.value}")
-
-        if (ApiClient.token.isEmpty()) {
-            Log.w(TAG, "Token is empty, cannot load room list")
-            return
-        }
-
-        serviceScope.launch {
-            try {
-                val result = ApiClient.getRoomList(settings.serverAddress)
-                result.fold(
-                    onSuccess = { rooms ->
-                        _roomList.value = rooms
-                        Log.d(TAG, "获取频道列表成功: ${rooms.size}个频道")
-                    },
-                    onFailure = { e ->
-                        Log.e(TAG, "获取频道列表失败: ${e.message}")
-                    }
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Load room list failed: ${e.message}")
-            }
-        }
-    }
-    
-    fun startTransmitting(): Boolean {
-        if (!_isLoggedIn.value || _connectionState.value != ConnectionState.CONNECTED) {
-            Log.w(TAG, "Cannot transmit: not connected")
-            return false
-        }
-
-        return audioManager.startTransmitting()
-    }
-    
-    fun stopTransmitting() {
-        audioManager.stopTransmitting()
-    }
-    
-    fun isTransmitting(): Boolean = audioManager.isTransmitting.value
-    
-    fun isReceiving(): Boolean = audioManager.isReceiving.value
-    
-    fun isConnected(): Boolean = udpClient.isConnected()
-    
-    fun handleKeyEvent(event: android.view.KeyEvent): Boolean {
-        return pttController.onKeyEvent(event)
-    }
-    
-    fun getCurrentUser(): ApiClient.UserInfo? = currentUserInfo
-    
-    fun setProtocol(type: ProtocolType) {
-        protocolManager.setProtocol(type)
-        Log.d(TAG, "Protocol set to: $type")
-    }
-    
-    fun getCurrentProtocol(): ProtocolType = protocolManager.getCurrentProtocol()
-    
-    fun encodeWithProtocol(data: String, type: ProtocolType): ByteArray? {
-        return protocolManager.encode(data, type)
-    }
-    
-    fun decodeWithProtocol(data: ByteArray, type: ProtocolType): String? {
-        return protocolManager.decode(data, type)
-    }
-    
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -557,24 +484,21 @@ class TalkService : Service() {
                 description = "保持对讲服务在后台运行"
                 setSound(null, null)
             }
-            
+
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
         }
     }
-    
+
     private fun createNotification(): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
-        
+
         val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE
+            this, 0, intent, PendingIntent.FLAG_IMMUTABLE
         )
-        
+
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("78HAM 对讲")
             .setContentText("服务运行中，按PTT开始对讲")
@@ -583,75 +507,30 @@ class TalkService : Service() {
             .setOngoing(true)
             .build()
     }
-    
-    fun updateNotification(content: String) {
+
+    private fun updateNotification(content: String) {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("78HAM 对讲")
             .setContentText(content)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .build()
-        
+
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
-    
+
     private suspend fun showToast(message: String) {
         withContext(Dispatchers.Main) {
             Toast.makeText(this@TalkService, message, Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun startRefreshData() {
-        stopRefreshData()
-        refreshJob = serviceScope.launch {
-            while (true) {
-                ensureActive()
-                refreshData()
-                delay(5000)
-            }
-        }
-    }
-
-    private fun stopRefreshData() {
-        refreshJob?.cancel()
-        refreshJob = null
-    }
-
-    private suspend fun refreshData() {
-        val settings = settingsRepository.loadSettings()
-        val userInfo = currentUserInfo ?: return
-
-        try {
-            val ssid = currentDeviceData?.ssid ?: 78
-            val deviceResult = ApiClient.getDevice(settings.serverAddress, userInfo.callsign, ssid)
-            deviceResult.fold(
-                onSuccess = { device ->
-                    currentDeviceData = device
-                    Log.d(TAG, "refreshData: device groupId=${device.groupId}, isOnline=${device.isOnline}, ssid=${device.ssid}, devModel=${device.devModel}")
-                    if (device.groupId > 0) {
-                        _currentRoomId.value = device.groupId
-                        val groupResult = ApiClient.getGroup(settings.serverAddress, device.groupId)
-                        groupResult.fold(
-                            onSuccess = { group ->
-                                _onlineCount.value = group.onlineCount
-                                _currentGroupName.value = group.name
-                                Log.d(TAG, "在线人数: ${group.onlineCount}, 群组: ${group.name}, 总设备: ${group.deviceCount}")
-                            },
-                            onFailure = { e ->
-                                Log.e(TAG, "获取群组信息失败: ${e.message}")
-                            }
-                        )
-                    } else {
-                        Log.w(TAG, "refreshData: device groupId=0, user has not joined any group yet")
-                    }
-                },
-                onFailure = { e ->
-                    Log.e(TAG, "获取设备信息失败: ${e.message}")
-                }
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "refreshData异常: ${e.message}")
-        }
-    }
+    data class VoiceMessage(
+        val callsign: String,
+        val ssid: Int,
+        val content: String,
+        val timestamp: String,
+        val type: Int
+    )
 }

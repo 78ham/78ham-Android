@@ -13,7 +13,7 @@ object Nrl21Protocol {
     const val HEADER = "NRL2"
     const val FIXED_BUFFER_SIZE = 48
     const val PACKET_SIZE = FIXED_BUFFER_SIZE
-    const val DEFAULT_SSID = 78
+    const val DEFAULT_SSID = 179
     const val DEFAULT_DEVMODEL = 101   // Android 客户端设备型号 (100=小程序, 101=Android, 102=iOS, 103=Win)
 
     // 包类型

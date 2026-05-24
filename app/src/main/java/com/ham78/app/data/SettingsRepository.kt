@@ -3,17 +3,20 @@ package com.ham78.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.view.KeyEvent
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class SettingsRepository(context: Context) {
-    
+
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    
+    private val gson = Gson()
+
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<UserSettings> = _settings.asStateFlow()
-    
+
     fun loadSettings(): UserSettings {
         return UserSettings(
             username = prefs.getString(KEY_USERNAME, "") ?: "",
@@ -22,15 +25,16 @@ class SettingsRepository(context: Context) {
             serverPort = prefs.getInt(KEY_SERVER_PORT, 60050),
             dmrId = prefs.getInt(KEY_DMR_ID, 0),
             callsign = prefs.getString(KEY_CALLSIGN, "") ?: "",
-            ssid = prefs.getInt(KEY_SSID, 78),
+            ssid = prefs.getInt(KEY_SSID, 179),
             codec = AudioCodec.valueOf(prefs.getString(KEY_CODEC, AudioCodec.G711.name) ?: AudioCodec.G711.name),
             volume = prefs.getInt(KEY_VOLUME, 100),
             screenOffPtt = prefs.getBoolean(KEY_SCREEN_OFF_PTT, true),
             pttKeyCode = prefs.getInt(KEY_PTT_KEY, KeyEvent.KEYCODE_VOLUME_UP),
-            autoConnect = prefs.getBoolean(KEY_AUTO_CONNECT, true)
+            autoConnect = prefs.getBoolean(KEY_AUTO_CONNECT, true),
+            servers = loadServerList()
         )
     }
-    
+
     fun saveSettings(settings: UserSettings) {
         prefs.edit().apply {
             putString(KEY_USERNAME, settings.username)
@@ -45,16 +49,55 @@ class SettingsRepository(context: Context) {
             putBoolean(KEY_SCREEN_OFF_PTT, settings.screenOffPtt)
             putInt(KEY_PTT_KEY, settings.pttKeyCode)
             putBoolean(KEY_AUTO_CONNECT, settings.autoConnect)
+            putString(KEY_SERVERS, gson.toJson(settings.servers))
             apply()
         }
         _settings.value = settings
     }
-    
+
     fun clearSettings() {
         prefs.edit().clear().apply()
         _settings.value = UserSettings()
     }
-    
+
+    // 多服务器管理
+    fun loadServerList(): List<ServerConfig> {
+        val json = prefs.getString(KEY_SERVERS, "[]") ?: "[]"
+        return try {
+            val type = object : TypeToken<List<ServerConfig>>() {}.type
+            gson.fromJson(json, type) ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveServerList(servers: List<ServerConfig>) {
+        prefs.edit().putString(KEY_SERVERS, gson.toJson(servers)).apply()
+        _settings.value = _settings.value.copy(servers = servers)
+    }
+
+    fun addServer(server: ServerConfig) {
+        val servers = loadServerList().toMutableList()
+        servers.removeAll { it.id == server.id }
+        servers.add(server)
+        saveServerList(servers)
+    }
+
+    fun removeServer(serverId: String) {
+        val servers = loadServerList().toMutableList()
+        servers.removeAll { it.id == serverId }
+        saveServerList(servers)
+    }
+
+    fun updateServer(server: ServerConfig) {
+        val servers = loadServerList().toMutableList()
+        val index = servers.indexOfFirst { it.id == server.id }
+        if (index >= 0) {
+            servers[index] = server
+            saveServerList(servers)
+        }
+    }
+
     companion object {
         private const val PREFS_NAME = "ham78_settings"
         private const val KEY_USERNAME = "username"
@@ -69,5 +112,6 @@ class SettingsRepository(context: Context) {
         private const val KEY_SCREEN_OFF_PTT = "screen_off_ptt"
         private const val KEY_PTT_KEY = "ptt_key"
         private const val KEY_AUTO_CONNECT = "auto_connect"
+        private const val KEY_SERVERS = "servers"
     }
 }

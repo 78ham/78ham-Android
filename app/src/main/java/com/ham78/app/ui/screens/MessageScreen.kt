@@ -2,7 +2,18 @@ package com.ham78.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -13,8 +24,21 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,12 +48,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ham78.app.network.MessageStore
 import com.ham78.app.network.ServerConnection
-import com.ham78.app.ui.theme.*
+import com.ham78.app.ui.theme.BrandCyan
+import com.ham78.app.ui.theme.BrandPink
+import com.ham78.app.ui.theme.BrandPurple
+import com.ham78.app.ui.theme.ServerOffline
+import com.ham78.app.ui.theme.ServerOnline
+import com.ham78.app.ui.theme.Surface
+import com.ham78.app.ui.theme.SurfaceCard
+import com.ham78.app.ui.theme.TextOnPrimary
+import com.ham78.app.ui.theme.TextPrimary
+import com.ham78.app.ui.theme.TextSecondary
 
-/**
- * 消息界面
- * 显示所有服务器的文本消息，支持发送文本和上传位置
- */
 @Composable
 fun MessageScreen(
     messages: List<MessageStore.TextMessage>,
@@ -42,7 +71,6 @@ fun MessageScreen(
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    // 自动滚动到底部
     LaunchedEffect(messages.size, messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
@@ -57,7 +85,6 @@ fun MessageScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // 标题
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
@@ -89,7 +116,6 @@ fun MessageScreen(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // 消息列表
             if (messages.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -133,7 +159,6 @@ fun MessageScreen(
                 }
             }
 
-            // 输入框
             if (activeServer != null && isConnected) {
                 Card(
                     modifier = Modifier
@@ -149,7 +174,6 @@ fun MessageScreen(
                             .padding(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // 位置按钮
                         IconButton(
                             onClick = onSendLocation,
                             modifier = Modifier.size(40.dp)
@@ -162,7 +186,6 @@ fun MessageScreen(
                             )
                         }
 
-                        // 文本输入
                         TextField(
                             value = inputText,
                             onValueChange = { inputText = it },
@@ -185,7 +208,6 @@ fun MessageScreen(
                             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp)
                         )
 
-                        // 发送按钮
                         IconButton(
                             onClick = {
                                 if (inputText.isNotBlank()) {
@@ -231,7 +253,6 @@ fun MessageBubble(
         horizontalArrangement = if (message.isSelf) Arrangement.End else Arrangement.Start
     ) {
         if (!message.isSelf) {
-            // 对方头像
             Box(
                 modifier = Modifier
                     .size(32.dp)
@@ -298,7 +319,6 @@ fun MessageBubble(
             }
 
             if (isPlayableVoice) {
-                // 语音消息：点击气泡回放
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         Icons.Filled.PlayArrow,

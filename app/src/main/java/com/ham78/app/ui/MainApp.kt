@@ -80,6 +80,7 @@ import com.ham78.app.ui.theme.Surface
 import com.ham78.app.ui.theme.TextOnPrimary
 import com.ham78.app.ui.theme.TextPrimary
 import com.ham78.app.ui.theme.TextSecondary
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 
 sealed class BottomNavItem(

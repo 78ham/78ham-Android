@@ -2,7 +2,17 @@ package com.ham78.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -14,8 +24,24 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,13 +51,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ham78.app.data.ServerConfig
 import com.ham78.app.network.ConnectionState
+import com.ham78.app.network.ApiClient
 import com.ham78.app.network.ServerConnection
-import com.ham78.app.ui.theme.*
+import com.ham78.app.ui.theme.Background
+import com.ham78.app.ui.theme.BrandPurple
+import com.ham78.app.ui.theme.Connected
+import com.ham78.app.ui.theme.Error
+import com.ham78.app.ui.theme.ServerOffline
+import com.ham78.app.ui.theme.ServerOnline
+import com.ham78.app.ui.theme.ServerConnecting
+import com.ham78.app.ui.theme.Surface
+import com.ham78.app.ui.theme.SurfaceCard
+import com.ham78.app.ui.theme.TextOnPrimary
+import com.ham78.app.ui.theme.TextPrimary
+import com.ham78.app.ui.theme.TextSecondary
 
-/**
- * 服务器管理界面
- * 显示所有服务器配置，支持添加、删除、连接、切换
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServerScreen(
@@ -66,7 +100,6 @@ fun ServerScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 标题
             Text(
                 text = "服务器管理",
                 fontSize = 22.sp,
@@ -82,7 +115,6 @@ fun ServerScreen(
             )
 
             if (serverConnections.isEmpty() && savedServers.isEmpty()) {
-                // 空状态
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -113,7 +145,6 @@ fun ServerScreen(
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // 显示已连接的服务器
                     items(serverConnections) { conn ->
                         ServerConnectionCard(
                             connection = conn,
@@ -123,7 +154,6 @@ fun ServerScreen(
                         )
                     }
 
-                    // 显示未连接的已保存服务器
                     val unconnected = savedServers.filter { config ->
                         serverConnections.none { it.serverId == config.id || it.serverHost == config.host }
                     }
@@ -140,7 +170,6 @@ fun ServerScreen(
             }
         }
 
-        // 添加服务器对话框
         if (showAddDialog) {
             AddServerDialog(
                 onDismiss = { showAddDialog = false },
@@ -180,7 +209,6 @@ fun ServerConnectionCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 状态指示器
                     Box(
                         modifier = Modifier
                             .size(10.dp)

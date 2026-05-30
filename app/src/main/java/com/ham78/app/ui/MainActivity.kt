@@ -10,13 +10,15 @@ import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.ham78.app.service.TalkService
-import com.ham78.app.ui.theme.*
+import com.ham78.app.ui.theme.Background
+import com.ham78.app.ui.theme.BrandPurple
 
 class MainActivity : ComponentActivity() {
 

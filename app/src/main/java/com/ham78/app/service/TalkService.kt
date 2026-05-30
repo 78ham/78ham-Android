@@ -136,12 +136,15 @@ class TalkService : Service() {
             )
         }
 
-        multiServerManager.onVoiceReceived = { serverId, callsign, ssid ->
+        multiServerManager.onVoiceReceived = { serverId, callsign, ssid, clipId, durationMs ->
             val serverName = multiServerManager.serverConnections.value
                 .find { it.serverId == serverId }?.name ?: serverId
 
             val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
                 .format(java.util.Date())
+
+            val durationLabel = if (durationMs > 0) "%.1f″".format(durationMs / 1000.0) else ""
+            val content = if (durationLabel.isNotEmpty()) "[语音] $durationLabel" else "[语音]"
 
             messageStore.addMessage(
                 MessageStore.TextMessage(
@@ -150,16 +153,18 @@ class TalkService : Service() {
                     serverName = serverName,
                     callsign = callsign,
                     ssid = ssid,
-                    content = "[语音]",
+                    content = content,
                     timestamp = timestamp,
                     timestampMs = System.currentTimeMillis(),
                     isSelf = false,
-                    type = MessageStore.MessageType.VOICE
+                    type = MessageStore.MessageType.VOICE,
+                    voiceClipId = clipId,
+                    voiceDurationMs = durationMs
                 )
             )
 
             serviceScope.launch {
-                _receivedMessages.emit(VoiceMessage(callsign, ssid, "[语音]", timestamp, 1))
+                _receivedMessages.emit(VoiceMessage(callsign, ssid, content, timestamp, 1))
             }
         }
 
@@ -265,6 +270,17 @@ class TalkService : Service() {
     fun isTransmitting(): Boolean = multiServerManager.isTransmitting()
     fun isReceiving(): Boolean = multiServerManager.isReceiving()
 
+    /** 回放某条语音消息（语音回放） */
+    fun replayVoice(clipId: String) {
+        if (clipId.isEmpty()) return
+        val pcm = com.ham78.app.audio.VoiceClipStore.get(clipId)
+        if (pcm == null) {
+            Log.w(TAG, "replayVoice: clip not found or expired, id=$clipId")
+            return
+        }
+        multiServerManager.replayVoiceClip(pcm)
+    }
+
     fun handleKeyEvent(event: android.view.KeyEvent): Boolean {
         return pttController.onKeyEvent(event)
     }
@@ -275,34 +291,53 @@ class TalkService : Service() {
      * 发送文本消息到指定服务器
      */
     fun sendTextMessage(serverId: String, text: String) {
-        val connection = multiServerManager.getConnection(serverId) ?: return
-        val userInfo = connection.userInfo ?: return
+        val connection = multiServerManager.getConnection(serverId)
+        if (connection == null) {
+            Log.e(TAG, "sendTextMessage: no connection for serverId=$serverId")
+            return
+        }
+        val userInfo = connection.userInfo
+        if (userInfo == null) {
+            Log.e(TAG, "sendTextMessage: no userInfo for serverId=$serverId (not logged in?)")
+            return
+        }
         val deviceData = connection.deviceData
+        val udpClient = connection.udpClient
+
+        if (!udpClient.isConnected()) {
+            Log.e(TAG, "sendTextMessage: UDP not connected for serverId=$serverId (state=${udpClient.connectionState.value})")
+            return
+        }
 
         val ssid = deviceData?.ssid ?: 179
         val dmrId = deviceData?.dmrId ?: userInfo.dmrId
 
-        multiServerManager.sendTextMessage(serverId, userInfo.callsign, text, ssid, dmrId)
+        Log.d(TAG, "sendTextMessage: serverId=$serverId, callsign=${userInfo.callsign}, ssid=$ssid, dmrId=$dmrId, text=${text.take(20)}")
+        val sent = multiServerManager.sendTextMessage(serverId, userInfo.callsign, text, ssid, dmrId)
 
-        // 添加到消息存储
-        val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-            .format(java.util.Date())
+        // 添加到消息存储（只在发送成功时）
+        if (sent) {
+            val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
+            val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
 
-        messageStore.addMessage(
-            MessageStore.TextMessage(
-                id = UUID.randomUUID().toString(),
-                serverId = serverId,
-                serverName = serverName,
-                callsign = userInfo.callsign,
-                ssid = ssid,
-                content = text,
-                timestamp = timestamp,
-                timestampMs = System.currentTimeMillis(),
-                isSelf = true,
-                type = MessageStore.MessageType.TEXT
+            messageStore.addMessage(
+                MessageStore.TextMessage(
+                    id = UUID.randomUUID().toString(),
+                    serverId = serverId,
+                    serverName = serverName,
+                    callsign = userInfo.callsign,
+                    ssid = ssid,
+                    content = text,
+                    timestamp = timestamp,
+                    timestampMs = System.currentTimeMillis(),
+                    isSelf = true,
+                    type = MessageStore.MessageType.TEXT
+                )
             )
-        )
+        } else {
+            Log.e(TAG, "sendTextMessage: failed to send message for serverId=$serverId")
+        }
     }
 
     /**

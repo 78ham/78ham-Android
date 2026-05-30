@@ -37,6 +37,8 @@ class AudioPlayer(private val context: Context) {
     private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
     private var initialBufferCount = 0
 
+    private var replayJob: Job? = null
+
     fun ensurePlayerReady(): Boolean {
         if (audioTrack != null && audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
             if (!isPlaying.get()) {
@@ -137,6 +139,8 @@ class AudioPlayer(private val context: Context) {
         isPlaying.set(false)
         playJob?.cancel()
         playJob = null
+        replayJob?.cancel()
+        replayJob = null
 
         try {
             audioTrack?.apply {
@@ -164,6 +168,31 @@ class AudioPlayer(private val context: Context) {
         }
 
         audioQueue.offer(pcmData)
+    }
+
+    /**
+     * 回放一段完整的 PCM 语音片段（语音回放）。
+     *
+     * 复用现有的播放队列与单一写线程（playbackLoop），按帧投递并在队列接近满时
+     * 等待消费，避免覆盖 MAX_QUEUE_SIZE 上限导致片段被截断，也避免多线程同时写
+     * AudioTrack。
+     */
+    fun playClip(pcm: ByteArray) {
+        if (pcm.isEmpty()) return
+        replayJob?.cancel()
+        replayJob = scope.launch {
+            if (!ensurePlayerReady()) return@launch
+            var offset = 0
+            while (offset < pcm.size && isPlaying.get()) {
+                // 队列接近满时等待消费，保持实时节奏
+                while (audioQueue.size >= MAX_QUEUE_SIZE - 2 && isPlaying.get()) {
+                    delay(10)
+                }
+                val end = minOf(offset + BYTES_PER_FRAME, pcm.size)
+                audioQueue.offer(pcm.copyOfRange(offset, end))
+                offset = end
+            }
+        }
     }
 
     fun setVolume(volume: Float) {

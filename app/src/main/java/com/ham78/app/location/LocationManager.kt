@@ -10,7 +10,9 @@ import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
-import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * 位置管理器
@@ -44,10 +46,13 @@ class LocationManager(private val context: Context) {
 
         return try {
             val cancellationToken = CancellationTokenSource()
-            val location: Location = fusedLocationClient.getCurrentLocation(
-                Priority.PRIORITY_HIGH_ACCURACY,
-                cancellationToken.token
-            ).await()
+            val location: Location? = suspendCancellableCoroutine { cont ->
+                fusedLocationClient.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    cancellationToken.token
+                ).addOnSuccessListener { loc -> cont.resume(loc) }
+                 .addOnFailureListener { e -> cont.resumeWithException(e) }
+            }
 
             if (location != null) {
                 val lat = location.latitude
@@ -82,7 +87,11 @@ class LocationManager(private val context: Context) {
         if (!hasLocationPermission()) return null
 
         return try {
-            val location = fusedLocationClient.lastLocation.await()
+            val location = suspendCancellableCoroutine { cont ->
+                fusedLocationClient.lastLocation
+                    .addOnSuccessListener { loc -> cont.resume(loc) }
+                    .addOnFailureListener { e -> cont.resumeWithException(e) }
+            }
             if (location != null) {
                 Pair(location.latitude, location.longitude)
             } else {

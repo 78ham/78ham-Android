@@ -95,12 +95,22 @@ fun MainApp(
     // 频道列表
     var roomList by remember { mutableStateOf(listOf<com.ham78.app.network.ApiClient.RoomInfo>()) }
 
-    // 轮询状态
-    LaunchedEffect(Unit) {
-        while (true) {
-            isTransmitting = talkService.isTransmitting()
-            isReceiving = talkService.isReceiving()
-            kotlinx.coroutines.delay(200)
+    // 优化轮询状态：使用状态订阅而不是频繁轮询
+    LaunchedEffect(serverConnections, activeServerId) {
+        // 只在有活跃服务器时才启动轮询
+        if (activeServerId.isNotEmpty()) {
+            while (true) {
+                val activeConn = serverConnections.find { it.serverId == activeServerId }
+                if (activeConn != null) {
+                    isTransmitting = talkService.isTransmitting()
+                    isReceiving = talkService.isReceiving()
+                }
+                kotlinx.coroutines.delay(500) // 从200ms增加到500ms，降低CPU使用
+            }
+        } else {
+            // 没有活跃服务器时复位收发状态，避免残留 TX/RX 显示
+            isTransmitting = false
+            isReceiving = false
         }
     }
 
@@ -325,6 +335,9 @@ fun MainApp(
                             scope.launch {
                                 talkService.uploadLocationToActive()
                             }
+                        },
+                        onReplayVoice = { clipId ->
+                            talkService.replayVoice(clipId)
                         }
                     )
 

@@ -1,6 +1,7 @@
 package com.ham78.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -10,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -35,7 +37,8 @@ fun MessageScreen(
     activeServer: ServerConnection?,
     isConnected: Boolean,
     onSendMessage: (String) -> Unit,
-    onSendLocation: () -> Unit
+    onSendLocation: () -> Unit,
+    onReplayVoice: (String) -> Unit = {}
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -128,7 +131,7 @@ fun MessageScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(messages, key = { it.id }) { msg ->
-                        MessageBubble(message = msg)
+                        MessageBubble(message = msg, onReplayVoice = onReplayVoice)
                     }
                     item { Spacer(modifier = Modifier.height(8.dp)) }
                 }
@@ -219,7 +222,12 @@ fun MessageScreen(
 }
 
 @Composable
-fun MessageBubble(message: MessageStore.TextMessage) {
+fun MessageBubble(
+    message: MessageStore.TextMessage,
+    onReplayVoice: (String) -> Unit = {}
+) {
+    val isPlayableVoice = message.type == MessageStore.MessageType.VOICE &&
+        message.voiceClipId.isNotEmpty()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -266,6 +274,10 @@ fun MessageBubble(message: MessageStore.TextMessage) {
                     if (message.isSelf) BrandPurple.copy(alpha = 0.85f)
                     else SurfaceCard
                 )
+                .then(
+                    if (isPlayableVoice) Modifier.clickable { onReplayVoice(message.voiceClipId) }
+                    else Modifier
+                )
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             if (!message.isSelf) {
@@ -289,12 +301,31 @@ fun MessageBubble(message: MessageStore.TextMessage) {
                 }
             }
 
-            Text(
-                text = message.content,
-                color = if (message.isSelf) TextOnPrimary else TextPrimary,
-                fontSize = 14.sp,
-                lineHeight = 20.sp
-            )
+            if (isPlayableVoice) {
+                // 语音消息：点击气泡回放
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = "回放语音",
+                        tint = if (message.isSelf) TextOnPrimary else BrandPurple,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = message.content,
+                        color = if (message.isSelf) TextOnPrimary else TextPrimary,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            } else {
+                Text(
+                    text = message.content,
+                    color = if (message.isSelf) TextOnPrimary else TextPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            }
 
             Text(
                 text = message.timestamp,

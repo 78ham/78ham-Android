@@ -23,6 +23,8 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
 
     companion object {
         private const val TAG = "MultiServerManager"
+        // 语音会话静默判定：超过该时长无语音包则认为本段语音结束
+        private const val VOICE_SESSION_GAP_MS = 1200L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -48,8 +50,8 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
 
     // 文本消息回调
     var onTextMessageReceived: ((serverId: String, callsign: String, ssid: Int, content: String, timestamp: String) -> Unit)? = null
-    // 语音消息回调
-    var onVoiceReceived: ((serverId: String, callsign: String, ssid: Int) -> Unit)? = null
+    // 语音消息回调（一段语音结束时回调一次，clipId 指向可回放的缓存音频）
+    var onVoiceReceived: ((serverId: String, callsign: String, ssid: Int, clipId: String, durationMs: Long) -> Unit)? = null
 
     fun getActiveConnection(): ServerResources? {
         val activeId = _activeServerId.value
@@ -100,11 +102,11 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
             )
         }
 
-        // 登录
+        // 登录（返回真实的连接结果，便于调用方判断成败）
         val loginResult = ApiClient.login(config.host, config.username, config.password)
-        loginResult.fold(
+        return loginResult.fold(
             onSuccess = { userInfo ->
-                resources.loginToken = ApiClient.token
+                resources.loginToken = ApiClient.getTokenForServer(config.host)
                 resources.userInfo = userInfo
 
                 updateState(serverId) {
@@ -153,9 +155,12 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                     updateState(serverId) {
                         it.copy(connectionState = ConnectionState.CONNECTED)
                     }
-                    // 如果没有活跃服务器，设为活跃
+                    // 如果没有活跃服务器，自动设为活跃；否则保持当前活跃服务器
                     if (_activeServerId.value.isEmpty()) {
                         switchActiveServer(serverId)
+                        Log.d(TAG, "Set as active server (first connection): $serverId")
+                    } else {
+                        Log.d(TAG, "Connected to server but keeping active: ${_activeServerId.value}, new: $serverId")
                     }
                     startRefreshData(serverId, resources, config.host, userInfo)
                     emitState()
@@ -174,11 +179,9 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                     it.copy(connectionState = ConnectionState.DISCONNECTED)
                 }
                 emitState()
-                return false
+                false
             }
         )
-
-        return true
     }
 
     /**
@@ -189,6 +192,10 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         resources.refreshJob?.cancel()
         resources.udpClient.disconnect()
         resources.audioManager.release()
+        // 清理该服务器的 API token
+        connectionStates[serverId]?.serverHost?.takeIf { it.isNotEmpty() }?.let {
+            ApiClient.clearTokenForServer(it)
+        }
         connections.remove(serverId)
         connectionStates.remove(serverId)
 
@@ -209,14 +216,16 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         // 停止旧活跃服务器的音频播放
         val oldActive = _activeServerId.value
         if (oldActive.isNotEmpty()) {
-            connections[oldActive]?.audioManager?.stopReceiving()
+            connections[oldActive]?.audioManager?.clearReceivingState()
         }
 
         _activeServerId.value = serverId
 
         // 更新所有连接的 isActive 状态
         connectionStates.keys.forEach { id ->
-            connectionStates[id] = connectionStates[id]?.copy(isActive = id == serverId)
+            connectionStates[id]?.let { conn ->
+                connectionStates[id] = conn.copy(isActive = id == serverId)
+            }
         }
 
         emitState()
@@ -233,21 +242,50 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     }
 
     /**
-     * 发送文本消息
+     * 回放语音片段：通过当前活跃服务器的播放器播放缓存的 PCM。
+     * 片段内容与服务器无关，统一走活跃连接的音频输出。
      */
-    fun sendTextMessage(serverId: String, callsign: String, text: String, ssid: Int = 179, dmrId: Int = 0) {
-        val resources = connections[serverId] ?: return
+    fun replayVoiceClip(pcm: ByteArray) {
+        getActiveConnection()?.audioManager?.playClip(pcm)
+    }
+
+    /**
+     * 发送文本消息
+     * @return true 如果发送成功，false 如果发送失败
+     */
+    fun sendTextMessage(serverId: String, callsign: String, text: String, ssid: Int = 179, dmrId: Int = 0): Boolean {
+        val resources = connections[serverId]
+        if (resources == null) {
+            Log.e(TAG, "sendTextMessage: no connection for serverId=$serverId")
+            return false
+        }
+        val udp = resources.udpClient
+        if (!udp.isConnected()) {
+            Log.e(TAG, "sendTextMessage: UDP not connected for serverId=$serverId")
+            return false
+        }
         val packet = Nrl21Protocol.createTextPacket(callsign, text, "text", ssid, 101, dmrId)
-        resources.udpClient.sendPacket(packet)
+        Log.d(TAG, "sendTextMessage: serverId=$serverId, callsign=$callsign, ssid=$ssid, text=${text.take(20)}, packetSize=${packet.size}")
+        val sent = udp.sendPacket(packet)
+        if (!sent) {
+            Log.e(TAG, "sendTextMessage: sendPacket failed for serverId=$serverId")
+        }
+        return sent
     }
 
     /**
      * 发送位置
      */
     fun sendLocation(serverId: String, callsign: String, latitude: Double, longitude: Double, ssid: Int = 179, dmrId: Int = 0) {
-        val resources = connections[serverId] ?: return
+        val resources = connections[serverId] ?: run {
+            Log.e(TAG, "sendLocation: no connection for serverId=$serverId")
+            return
+        }
         val packet = Nrl21Protocol.createLocationPacket(callsign, latitude, longitude, ssid, 101, dmrId)
-        resources.udpClient.sendPacket(packet)
+        val sent = resources.udpClient.sendPacket(packet)
+        if (!sent) {
+            Log.e(TAG, "sendLocation: sendPacket failed for serverId=$serverId")
+        }
     }
 
     /**
@@ -310,16 +348,67 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     }
 
     private fun setupPacketListener(serverId: String, resources: ServerResources) {
+        // 语音会话状态：合并同一说话人的连续语音包，仅在会话结束时回调一次。
+        // 会话结束的判定为：说话人切换 或 静默超过 VOICE_SESSION_GAP_MS。
+        val voiceLock = Any()
+        var sessionCallsign = ""
+        var sessionSsid = 0
+        val sessionPcm = java.io.ByteArrayOutputStream()
+        var flushJob: Job? = null
+
+        // 结束当前语音会话：缓存 PCM 用于回放，并回调一条语音消息。
+        // 调用方必须持有 voiceLock。
+        fun flushVoiceSession() {
+            if (sessionCallsign.isEmpty()) return
+            val callsign = sessionCallsign
+            val ssid = sessionSsid
+            val pcm = sessionPcm.toByteArray()
+            sessionPcm.reset()
+            sessionCallsign = ""
+            sessionSsid = 0
+
+            var clipId = ""
+            var durationMs = 0L
+            if (pcm.isNotEmpty()) {
+                clipId = java.util.UUID.randomUUID().toString()
+                com.ham78.app.audio.VoiceClipStore.put(clipId, pcm)
+                durationMs = com.ham78.app.audio.VoiceClipStore.durationMs(pcm)
+            }
+            onVoiceReceived?.invoke(serverId, callsign, ssid, clipId, durationMs)
+        }
+
         resources.udpClient.packetListener = object : UdpClient.PacketListener {
             override fun onPacketReceived(packet: Nrl21Protocol.Packet) {
                 when (packet.type) {
                     Nrl21Protocol.TYPE_VOICE, Nrl21Protocol.TYPE_OPUS -> {
-                        // 只播放活跃服务器的音频
+                        // 只播放活跃服务器的音频（实时播放每个语音包）
                         if (serverId == _activeServerId.value) {
                             resources.audioManager.handleReceivedAudio(packet.data, packet.type, packet.callSign)
                         }
-                        updateState(serverId) { it }
-                        onVoiceReceived?.invoke(serverId, packet.callSign, packet.ssid)
+
+                        synchronized(voiceLock) {
+                            // 说话人切换：先结束上一段语音
+                            if (sessionCallsign.isNotEmpty() &&
+                                (packet.callSign != sessionCallsign || packet.ssid != sessionSsid)) {
+                                flushVoiceSession()
+                            }
+                            // 开启新会话
+                            if (sessionCallsign.isEmpty()) {
+                                sessionCallsign = packet.callSign
+                                sessionSsid = packet.ssid
+                            }
+                            // 累积解码后的 PCM 供回放
+                            resources.audioManager.decodeToPcm(packet.data, packet.type)?.let {
+                                sessionPcm.write(it)
+                            }
+                        }
+
+                        // 重置静默计时器：到点无新包则结束本段语音并显示一条消息
+                        flushJob?.cancel()
+                        flushJob = scope.launch {
+                            delay(VOICE_SESSION_GAP_MS)
+                            synchronized(voiceLock) { flushVoiceSession() }
+                        }
                     }
                     Nrl21Protocol.TYPE_TEXT -> {
                         val textContent = Nrl21Protocol.TextContent.parse(packet.data)

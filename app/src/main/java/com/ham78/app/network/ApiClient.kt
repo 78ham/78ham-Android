@@ -19,16 +19,27 @@ object ApiClient {
     private const val TIMEOUT_MS = 15000
     private const val USER_AGENT = "78HAM-Android/1.0"
 
-    // Token 管理
+    // Token 管理（按服务器存储，支持多服务器同时登录）
+    private val serverTokens = mutableMapOf<String, String>()
+
     var token: String = ""
+        get() = ""  // 不再使用全局 token
         private set
 
-    fun setToken(newToken: String) {
-        token = newToken
+    fun getTokenForServer(serverHost: String): String {
+        return serverTokens[normalizeUrl(serverHost)] ?: ""
     }
 
-    fun clearToken() {
-        token = ""
+    fun setTokenForServer(serverHost: String, newToken: String) {
+        serverTokens[normalizeUrl(serverHost)] = newToken
+    }
+
+    fun clearTokenForServer(serverHost: String) {
+        serverTokens.remove(normalizeUrl(serverHost))
+    }
+
+    fun clearAllTokens() {
+        serverTokens.clear()
     }
 
     // ============== API 接口 ==============
@@ -45,7 +56,7 @@ object ApiClient {
                 Log.d(TAG, "POST $url")
 
                 val requestBody: Map<String, String> = mapOf("username" to username, "password" to password)
-                val response: String = makeRequest(url, "POST", body = requestBody)
+                val response: String = makeRequest(url, "POST", body = requestBody, serverHost = serverHost)
                 val map: Map<*, *> = parseJson(response)
 
                 val code: Int = getCode(map)
@@ -54,7 +65,7 @@ object ApiClient {
                     if (data != null) {
                         val newToken: String = data["token"] as? String ?: ""
                         if (newToken.isNotEmpty()) {
-                            token = newToken
+                            setTokenForServer(serverHost, newToken)
                             // 登录成功后获取用户信息
                             getUserInfo(serverHost)
                         } else {
@@ -80,7 +91,7 @@ object ApiClient {
             val baseUrl: String = normalizeUrl(serverHost)
             val url: String = "$baseUrl/user/info"
 
-            val response: String = makeRequest(url, "POST", body = emptyMap<String, Any>())
+            val response: String = makeRequest(url, "POST", body = emptyMap<String, Any>(), serverHost = serverHost)
             val map: Map<*, *> = parseJson(response)
 
             val code: Int = getCode(map)
@@ -118,7 +129,7 @@ object ApiClient {
             val baseUrl: String = normalizeUrl(serverHost)
             val url: String = "$baseUrl/group/list/mini"
 
-            val response: String = makeRequest(url, "POST", body = emptyMap<String, Any>())
+            val response: String = makeRequest(url, "POST", body = emptyMap<String, Any>(), serverHost = serverHost)
             val map: Map<*, *> = parseJson(response)
 
             val code: Int = getCode(map)
@@ -159,7 +170,7 @@ object ApiClient {
             val url: String = "$baseUrl/group/get"
 
             val data: Map<String, Any> = mapOf("group_id" to groupId)
-            val response: String = makeRequest(url, "POST", body = data)
+            val response: String = makeRequest(url, "POST", body = data, serverHost = serverHost)
             val map: Map<*, *> = parseJson(response)
 
             val code: Int = getCode(map)
@@ -217,7 +228,7 @@ object ApiClient {
                 val url: String = "$baseUrl/device/get"
 
                 val data: Map<String, Any> = mapOf("callsign" to callsign, "ssid" to ssid)
-                val response: String = makeRequest(url, "POST", body = data)
+                val response: String = makeRequest(url, "POST", body = data, serverHost = serverHost)
                 val map: Map<*, *> = parseJson(response)
 
                 val code: Int = getCode(map)
@@ -269,7 +280,7 @@ object ApiClient {
                     "last_voice_end_time" to "0001-01-01T00:00:00Z"
                 )
 
-                val response: String = makeRequest(url, "POST", body = data)
+                val response: String = makeRequest(url, "POST", body = data, serverHost = serverHost)
                 val map: Map<*, *> = parseJson(response)
 
                 val code: Int = getCode(map)
@@ -336,7 +347,8 @@ object ApiClient {
         url: String,
         method: String,
         headers: Map<String, String> = emptyMap(),
-        body: Any? = null
+        body: Any? = null,
+        serverHost: String? = null
     ): String {
         val connection: HttpURLConnection = URL(url).openConnection() as HttpURLConnection
         connection.apply {
@@ -346,8 +358,10 @@ object ApiClient {
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Accept", "application/json")
-            if (token.isNotEmpty()) {
-                setRequestProperty("x-token", token)
+            // 使用对应服务器的 token
+            val tokenForRequest = serverHost?.let { getTokenForServer(it) } ?: ""
+            if (tokenForRequest.isNotEmpty()) {
+                setRequestProperty("x-token", tokenForRequest)
             }
             headers.forEach { (key: String, value: String) ->
                 setRequestProperty(key, value)

@@ -114,9 +114,16 @@ class UdpClient {
 
     fun sendPacket(packet: ByteArray): Boolean {
         return try {
-            val address = serverAddress ?: return false
+            val address = serverAddress ?: run {
+                Log.e(TAG, "sendPacket: serverAddress is null")
+                return false
+            }
+            val sock = socket ?: run {
+                Log.e(TAG, "sendPacket: socket is null")
+                return false
+            }
             val datagramPacket = DatagramPacket(packet, packet.size, address, serverPort)
-            socket?.send(datagramPacket)
+            sock.send(datagramPacket)
             true
         } catch (e: Exception) {
             Log.e(TAG, "Send failed", e)

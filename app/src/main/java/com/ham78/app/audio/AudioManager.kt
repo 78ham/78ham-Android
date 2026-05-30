@@ -148,6 +148,33 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
         player.playAudio(pcmData)
     }
 
+    /**
+     * 将一帧网络语音数据解码为 PCM（8kHz/16bit/单声道小端）。
+     * 用于语音回放时缓存会话音频，不依赖是否为活跃服务器。
+     */
+    fun decodeToPcm(data: ByteArray, type: Int): ByteArray? {
+        return when (type) {
+            Nrl21Protocol.TYPE_VOICE -> {
+                val samples = ShortArray(data.size)
+                for (i in data.indices) {
+                    samples[i] = g711Codec.alaw2linear(data[i].toInt() and 0xFF).toShort()
+                }
+                val buf = java.nio.ByteBuffer.allocate(samples.size * 2)
+                buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                buf.asShortBuffer().put(samples)
+                buf.array()
+            }
+            Nrl21Protocol.TYPE_OPUS -> data
+            else -> null
+        }
+    }
+
+    /** 回放一段已缓存的 PCM 语音（语音回放） */
+    fun playClip(pcm: ByteArray) {
+        if (_isTransmitting.value) return
+        player.playClip(pcm)
+    }
+
     fun clearReceivingState() {
         _isReceiving.value = false
     }

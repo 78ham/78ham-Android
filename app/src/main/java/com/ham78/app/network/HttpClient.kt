@@ -31,8 +31,9 @@ class HttpClient {
         headers: Map<String, String> = emptyMap(),
         clazz: Class<T>
     ): Result<T> = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
         try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            connection = URL(url).openConnection() as HttpURLConnection
             connection.apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT
@@ -64,6 +65,8 @@ class HttpClient {
         } catch (e: Exception) {
             Log.e(TAG, "GET request failed", e)
             Result.failure(e)
+        } finally {
+            connection?.disconnect()
         }
     }
     
@@ -73,8 +76,9 @@ class HttpClient {
         headers: Map<String, String> = emptyMap(),
         clazz: Class<T>
     ): Result<T> = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
         try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            connection = URL(url).openConnection() as HttpURLConnection
             connection.apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT
@@ -116,6 +120,8 @@ class HttpClient {
         } catch (e: Exception) {
             Log.e(TAG, "POST request failed", e)
             Result.failure(e)
+        } finally {
+            connection?.disconnect()
         }
     }
     
@@ -125,8 +131,9 @@ class HttpClient {
         headers: Map<String, String> = emptyMap(),
         clazz: Class<T>
     ): Result<T> = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
         try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            connection = URL(url).openConnection() as HttpURLConnection
             connection.apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT
@@ -169,6 +176,8 @@ class HttpClient {
         } catch (e: Exception) {
             Log.e(TAG, "POST FORM request failed", e)
             Result.failure(e)
+        } finally {
+            connection?.disconnect()
         }
     }
 }

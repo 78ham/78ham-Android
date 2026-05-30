@@ -35,21 +35,13 @@ fun SettingsScreen() {
     val settings by settingsRepository.settings.collectAsState()
     val scrollState = rememberScrollState()
 
-    var ssid by remember { mutableStateOf(settings.ssid.toString()) }
-    var codec by remember { mutableStateOf(settings.codec) }
-    var volume by remember { mutableStateOf(settings.volume) }
-    var screenOffPtt by remember { mutableStateOf(settings.screenOffPtt) }
-    var autoConnect by remember { mutableStateOf(settings.autoConnect) }
-    var pttKeyCode by remember { mutableStateOf(settings.pttKeyCode.toString()) }
-
-    LaunchedEffect(settings) {
-        ssid = settings.ssid.toString()
-        codec = settings.codec
-        volume = settings.volume
-        screenOffPtt = settings.screenOffPtt
-        autoConnect = settings.autoConnect
-        pttKeyCode = settings.pttKeyCode.toString()
-    }
+    var ssid by remember(settings) { mutableStateOf(settings.ssid.toString()) }
+    var codec by remember(settings) { mutableStateOf(settings.codec) }
+    var volume by remember(settings) { mutableStateOf(settings.volume) }
+    var gain by remember(settings) { mutableStateOf(settings.gain) }
+    var screenOffPtt by remember(settings) { mutableStateOf(settings.screenOffPtt) }
+    var autoConnect by remember(settings) { mutableStateOf(settings.autoConnect) }
+    var pttKeyCode by remember(settings) { mutableStateOf(settings.pttKeyCode.toString()) }
 
     Column(
         modifier = Modifier
@@ -146,6 +138,20 @@ fun SettingsScreen() {
                     activeTrackColor = BrandPurple
                 )
             )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text("增益: ${"%.1f".format(gain)}x", fontSize = 14.sp, color = TextSecondary)
+            Slider(
+                value = gain,
+                onValueChange = { gain = it },
+                valueRange = 0.5f..3.0f,
+                modifier = Modifier.fillMaxWidth(),
+                colors = SliderDefaults.colors(
+                    thumbColor = BrandPurple,
+                    activeTrackColor = BrandPurple
+                )
+            )
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -235,6 +241,7 @@ fun SettingsScreen() {
                     ssid = ssid.toIntOrNull() ?: 179,
                     codec = codec,
                     volume = volume,
+                    gain = gain,
                     screenOffPtt = screenOffPtt,
                     pttKeyCode = pttKeyCode.toIntOrNull() ?: KeyEvent.KEYCODE_VOLUME_UP,
                     autoConnect = autoConnect,

@@ -28,9 +28,6 @@ class MainActivity : ComponentActivity() {
             val binder = service as TalkService.LocalBinder
             talkService = binder.getService()
             serviceBound = true
-            setContent {
-                MainScreenWrapper()
-            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -41,6 +38,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContent {
+            MainScreenWrapper()
+        }
 
         Intent(this, TalkService::class.java).also { intent ->
             startService(intent)
@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
     fun MainScreenWrapper() {
         val service = talkService
 
-        if (service == null) {
+        if (service == null || !serviceBound) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

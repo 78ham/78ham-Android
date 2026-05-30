@@ -4,7 +4,7 @@ package com.ham78.app.audio
  * 语音回放缓存
  *
  * 保存最近收到的语音会话解码后的 PCM 数据（8kHz / 16bit / 单声道），
- * 供消息界面点击“语音”气泡时重新播放。采用 LRU 上限避免内存膨胀。
+ * 供消息界面点击"语音"气泡时重新播放。采用 LRU 上限避免内存膨胀。
  */
 object VoiceClipStore {
 

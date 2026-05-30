@@ -27,79 +27,53 @@ class LocationManager(private val context: Context) {
     private val fusedLocationClient: FusedLocationProviderClient =
         LocationServices.getFusedLocationProviderClient(context)
 
-    /**
-     * 检查位置权限
-     */
-    fun hasLocationPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
+    fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(
             context, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
-    }
 
-    /**
-     * 获取当前位置
-     */
     suspend fun getCurrentLocation(): Result<Pair<Double, Double>> {
         if (!hasLocationPermission()) {
             return Result.failure(SecurityException("位置权限未授予"))
         }
 
+        val cts = CancellationTokenSource()
         return try {
-            val cancellationToken = CancellationTokenSource()
             val location: Location? = suspendCancellableCoroutine { cont ->
                 fusedLocationClient.getCurrentLocation(
-                    Priority.PRIORITY_HIGH_ACCURACY,
-                    cancellationToken.token
-                ).addOnSuccessListener { loc -> cont.resume(loc) }
-                 .addOnFailureListener { e -> cont.resumeWithException(e) }
+                    Priority.PRIORITY_HIGH_ACCURACY, cts.token
+                )
+                    .addOnSuccessListener { loc -> cont.resume(loc) }
+                    .addOnFailureListener { e -> cont.resumeWithException(e) }
+
+                cont.invokeOnCancellation { cts.cancel() }
             }
 
-            if (location != null) {
-                val lat = location.latitude
-                val lng = location.longitude
-                Log.d(TAG, "获取位置成功: $lat, $lng")
-                Result.success(Pair(lat, lng))
-            } else {
-                // 尝试获取最后已知位置
-                val lastLocation = getLastKnownLocation()
-                if (lastLocation != null) {
-                    Result.success(lastLocation)
-                } else {
-                    Result.failure(Exception("无法获取位置"))
+            when {
+                location != null -> {
+                    Log.d(TAG, "获取位置成功: ${location.latitude}, ${location.longitude}")
+                    Result.success(location.latitude to location.longitude)
                 }
+                else -> getLastKnownLocation()?.let { Result.success(it) }
+                    ?: Result.failure(Exception("无法获取位置"))
             }
         } catch (e: Exception) {
             Log.e(TAG, "获取位置失败: ${e.message}")
-            // fallback 到最后已知位置
-            val lastLocation = getLastKnownLocation()
-            if (lastLocation != null) {
-                Result.success(lastLocation)
-            } else {
-                Result.failure(e)
-            }
+            getLastKnownLocation()?.let { Result.success(it) } ?: Result.failure(e)
+        } finally {
+            cts.cancel()
         }
     }
 
-    /**
-     * 获取最后已知位置
-     */
     private suspend fun getLastKnownLocation(): Pair<Double, Double>? {
         if (!hasLocationPermission()) return null
-
         return try {
-            val location = suspendCancellableCoroutine { cont ->
+            val location: Location? = suspendCancellableCoroutine { cont ->
                 fusedLocationClient.lastLocation
                     .addOnSuccessListener { loc -> cont.resume(loc) }
                     .addOnFailureListener { e -> cont.resumeWithException(e) }
             }
-            if (location != null) {
-                Pair(location.latitude, location.longitude)
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "获取最后已知位置失败: ${e.message}")
-            null
-        }
+            location?.let { it.latitude to it.longitude }
+        } catch (_: Exception) { null }
     }
 }

@@ -4,13 +4,14 @@ import android.app.Application
 import android.util.Log
 
 class HamApplication : Application() {
-    
+
     companion object {
         private const val TAG = "HamApplication"
+        @Volatile
         lateinit var instance: HamApplication
             private set
     }
-    
+
     override fun onCreate() {
         super.onCreate()
         instance = this

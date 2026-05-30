@@ -15,7 +15,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
+/**
+ * 音频管理器
+ * 协调录音、编码、发送和接收、播放的完整音频流程
+ */
 class AudioManager(private val context: Context, private val udpClient: UdpClient) {
 
     companion object {
@@ -41,7 +47,6 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
 
     private var lastAudioTime = 0L
     private var receiveTimeoutJob: Job? = null
-
     private var playerReady = false
 
     private val recordListener = object : AudioRecorder.AudioDataListener {
@@ -53,15 +58,15 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
                 val encodedData = when (codec) {
                     AudioCodec.G711 -> {
                         val samples = ShortArray(frameData.size / 2)
-                        java.nio.ByteBuffer.wrap(frameData)
-                            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                            .asShortBuffer().get(samples)
+                        ByteBuffer.wrap(frameData)
+                            .order(ByteOrder.LITTLE_ENDIAN)
+                            .asShortBuffer()
+                            .get(samples)
                         g711Codec.encode(samples)
                     }
                     AudioCodec.OPUS -> frameData
                 }
 
-                Log.d(TAG, "Sending audio frame: ${encodedData.size} bytes, codec=$codec")
                 udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
             }
         }
@@ -82,6 +87,10 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
 
     fun setVolume(volume: Int) {
         player.setVolume(volume / 100f)
+    }
+
+    fun setGain(gain: Float) {
+        player.setGain(gain)
     }
 
     fun preparePlayer() {
@@ -130,21 +139,7 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
             }
         }
 
-        val pcmData = when (type) {
-            Nrl21Protocol.TYPE_VOICE -> {
-                val samples = ShortArray(data.size)
-                for (i in data.indices) {
-                    samples[i] = g711Codec.alaw2linear(data[i].toInt() and 0xFF).toShort()
-                }
-                val buf = java.nio.ByteBuffer.allocate(samples.size * 2)
-                buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                buf.asShortBuffer().put(samples)
-                buf.array()
-            }
-            Nrl21Protocol.TYPE_OPUS -> data
-            else -> return
-        }
-
+        val pcmData = decodeToPcm(data, type) ?: return
         player.playAudio(pcmData)
     }
 
@@ -159,8 +154,8 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
                 for (i in data.indices) {
                     samples[i] = g711Codec.alaw2linear(data[i].toInt() and 0xFF).toShort()
                 }
-                val buf = java.nio.ByteBuffer.allocate(samples.size * 2)
-                buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val buf = ByteBuffer.allocate(samples.size * 2)
+                buf.order(ByteOrder.LITTLE_ENDIAN)
                 buf.asShortBuffer().put(samples)
                 buf.array()
             }

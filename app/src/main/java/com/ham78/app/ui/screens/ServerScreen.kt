@@ -189,6 +189,7 @@ fun ServerConnectionCard(
                                 when (connection.connectionState) {
                                     ConnectionState.CONNECTED -> ServerOnline
                                     ConnectionState.CONNECTING -> ServerConnecting
+                                    ConnectionState.RECONNECTING -> ServerConnecting
                                     ConnectionState.DISCONNECTED -> ServerOffline
                                 }
                             )

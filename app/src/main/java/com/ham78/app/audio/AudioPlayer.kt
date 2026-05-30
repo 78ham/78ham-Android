@@ -7,10 +7,23 @@ import android.media.AudioManager as AndroidAudioManager
 import android.media.AudioTrack
 import android.os.Process
 import android.util.Log
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * 音频播放器
+ * 使用 AudioTrack 实时播放接收到的音频数据
+ */
 class AudioPlayer(private val context: Context) {
 
     companion object {
@@ -24,7 +37,8 @@ class AudioPlayer(private val context: Context) {
         const val BYTES_PER_FRAME = SAMPLES_PER_FRAME * 2
 
         private const val MAX_QUEUE_SIZE = 50
-        private const val INITIAL_BUFFER_FRAMES = 3
+        private const val JITTER_BUFFER_FRAMES = 4
+        private const val JITTER_HIGH_THRESHOLD = 15
     }
 
     private var audioTrack: AudioTrack? = null
@@ -35,16 +49,18 @@ class AudioPlayer(private val context: Context) {
     private var playJob: Job? = null
 
     private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
-    private var initialBufferCount = 0
+    private var gainMultiplier = 1.0f
 
     private var replayJob: Job? = null
 
     fun ensurePlayerReady(): Boolean {
-        if (audioTrack != null && audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
-            if (!isPlaying.get()) {
-                resumePlayback()
+        audioTrack?.let { track ->
+            if (track.state == AudioTrack.STATE_INITIALIZED) {
+                if (!isPlaying.get()) {
+                    resumePlayback()
+                }
+                return true
             }
-            return true
         }
 
         return startPlayback()
@@ -86,7 +102,6 @@ class AudioPlayer(private val context: Context) {
             }
 
             audioQueue.clear()
-            initialBufferCount = 0
             audioTrack?.play()
             isPlaying.set(true)
 
@@ -121,7 +136,6 @@ class AudioPlayer(private val context: Context) {
         try {
             if (audioTrack != null && audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
                 audioQueue.clear()
-                initialBufferCount = 0
                 audioTrack?.play()
                 isPlaying.set(true)
 
@@ -184,7 +198,6 @@ class AudioPlayer(private val context: Context) {
             if (!ensurePlayerReady()) return@launch
             var offset = 0
             while (offset < pcm.size && isPlaying.get()) {
-                // 队列接近满时等待消费，保持实时节奏
                 while (audioQueue.size >= MAX_QUEUE_SIZE - 2 && isPlaying.get()) {
                     delay(10)
                 }
@@ -204,15 +217,52 @@ class AudioPlayer(private val context: Context) {
         }
     }
 
+    fun setGain(gain: Float) {
+        gainMultiplier = gain.coerceIn(0.5f, 4.0f)
+    }
+
+    private fun applyGain(data: ByteArray): ByteArray {
+        if (gainMultiplier == 1.0f) return data
+        val shorts = ShortArray(data.size / 2)
+        ByteBuffer.wrap(data)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .asShortBuffer()
+            .get(shorts)
+        for (i in shorts.indices) {
+            val amplified = (shorts[i].toFloat() * gainMultiplier).toInt().coerceIn(-32768, 32767)
+            shorts[i] = amplified.toShort()
+        }
+        val buf = ByteBuffer.allocate(data.size)
+        buf.order(ByteOrder.LITTLE_ENDIAN)
+        buf.asShortBuffer().put(shorts)
+        return buf.array()
+    }
+
     private suspend fun playbackLoop() {
+        var bufferReady = false
+
         while (isPlaying.get()) {
             try {
+                if (!bufferReady) {
+                    if (audioQueue.size >= JITTER_BUFFER_FRAMES) {
+                        bufferReady = true
+                    } else {
+                        delay(5)
+                        continue
+                    }
+                }
+
                 val data = audioQueue.poll()
 
                 if (data != null && data.isNotEmpty()) {
-                    initialBufferCount++
-                    audioTrack?.write(data, 0, data.size)
+                    val outputData = applyGain(data)
+                    audioTrack?.write(outputData, 0, outputData.size)
+
+                    while (audioQueue.size > JITTER_HIGH_THRESHOLD) {
+                        audioQueue.poll()
+                    }
                 } else {
+                    bufferReady = false
                     delay(2)
                 }
             } catch (e: CancellationException) {

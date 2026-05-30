@@ -25,7 +25,6 @@ import androidx.compose.ui.unit.sp
 import com.ham78.app.network.MessageStore
 import com.ham78.app.network.ServerConnection
 import com.ham78.app.ui.theme.*
-import kotlinx.coroutines.launch
 
 /**
  * 消息界面
@@ -42,14 +41,11 @@ fun MessageScreen(
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
 
     // 自动滚动到底部
-    LaunchedEffect(messages.size) {
+    LaunchedEffect(messages.size, messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) {
-            scope.launch {
-                listState.animateScrollToItem(messages.size - 1)
-            }
+            listState.animateScrollToItem(messages.size - 1)
         }
     }
 

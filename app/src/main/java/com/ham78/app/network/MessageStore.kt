@@ -1,14 +1,26 @@
 package com.ham78.app.network
 
+import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 文本消息存储
- * 按服务器分组保存消息历史，优化内存使用
+ * 消息存储
+ * 管理文本和语音消息的缓存与持久化
  */
-class MessageStore {
+class MessageStore(private val context: Context? = null) {
 
     data class TextMessage(
         val id: String = "",
@@ -21,7 +33,6 @@ class MessageStore {
         val timestampMs: Long = 0,
         val isSelf: Boolean = false,
         val type: MessageType = MessageType.TEXT,
-        // 语音回放：缓存的 PCM 片段标识与时长（仅 VOICE 类型有效）
         val voiceClipId: String = "",
         val voiceDurationMs: Long = 0
     )
@@ -30,9 +41,16 @@ class MessageStore {
         TEXT, VOICE, LOCATION
     }
 
-    // 使用CopyOnWriteArrayList提高线程安全性和读取性能
     private val messages = java.util.concurrent.ConcurrentHashMap<String, java.util.ArrayList<TextMessage>>()
     private val maxMessagesPerServer = 200
+
+    private val gson = Gson()
+    private val saveScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val pendingSave = AtomicReference<Job?>(null)
+
+    private val prefs: SharedPreferences? by lazy {
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
 
     private val _allMessages = MutableStateFlow<List<TextMessage>>(emptyList())
     val allMessages: StateFlow<List<TextMessage>> = _allMessages.asStateFlow()
@@ -40,22 +58,22 @@ class MessageStore {
     private val _serverMessages = MutableStateFlow<Map<String, List<TextMessage>>>(emptyMap())
     val serverMessages: StateFlow<Map<String, List<TextMessage>>> = _serverMessages.asStateFlow()
 
+    init {
+        loadFromDisk()
+    }
+
     fun addMessage(message: TextMessage) {
-        val serverMessages = messages.getOrPut(message.serverId) { java.util.ArrayList() }
+        val serverMsgs = messages.getOrPut(message.serverId) { java.util.ArrayList() }
 
-        // 线程安全地添加消息
-        synchronized(serverMessages) {
-            serverMessages.add(message)
-
-            // 限制消息数量
-            while (serverMessages.size > maxMessagesPerServer) {
-                serverMessages.removeAt(0)
+        synchronized(serverMsgs) {
+            serverMsgs.add(message)
+            while (serverMsgs.size > maxMessagesPerServer) {
+                serverMsgs.removeAt(0)
             }
         }
 
-        // 语音已在上游按会话合并，消息频率已很低，这里始终发射，
-        // 避免之前“节流窗口内丢弃最后一条更新”导致消息不显示的问题。
         emitState()
+        scheduleSave()
     }
 
     fun getMessagesForServer(serverId: String): List<TextMessage> {
@@ -65,26 +83,28 @@ class MessageStore {
     }
 
     fun getAllMessages(): List<TextMessage> {
-        return messages.values.flatMap { msgs ->
-            synchronized(msgs) { msgs.toList() }
-        }.sortedBy { it.timestampMs }
+        return collectAllMessages()
     }
 
     fun clearServerMessages(serverId: String) {
         messages.remove(serverId)
         emitState()
+        saveToDisk()
     }
 
     fun clearAll() {
         messages.clear()
         emitState()
+        saveToDisk()
     }
 
-    private fun emitState() {
-        val all = messages.values.flatMap { msgs ->
+    private fun collectAllMessages(): List<TextMessage> =
+        messages.values.flatMap { msgs ->
             synchronized(msgs) { msgs.toList() }
-        }.sortedBy { it.timestampMs }.takeLast(500)
+        }.sortedBy { it.timestampMs }
 
+    private fun emitState() {
+        val all = collectAllMessages().takeLast(500)
         _allMessages.value = all
 
         val byServer = messages.mapValues { (_, msgs) ->
@@ -93,14 +113,52 @@ class MessageStore {
         _serverMessages.value = byServer
     }
 
+    private fun loadFromDisk() {
+        val json = prefs?.getString(KEY_MESSAGES, null) ?: return
+        try {
+            val type = object : TypeToken<Map<String, List<TextMessage>>>() {}.type
+            val loaded: Map<String, List<TextMessage>> = gson.fromJson(json, type) ?: return
+            loaded.forEach { (serverId, msgs) ->
+                messages[serverId] = ArrayList(msgs)
+            }
+            emitState()
+        } catch (e: Exception) {
+            Log.e("MessageStore", "Failed to load messages", e)
+        }
+    }
+
+    private fun saveToDisk() {
+        val store = prefs ?: return
+        try {
+            val toSave = messages.mapValues { (_, msgs) ->
+                synchronized(msgs) { msgs.takeLast(MAX_PERSISTED) }
+            }
+            store.edit().putString(KEY_MESSAGES, gson.toJson(toSave)).apply()
+        } catch (e: Exception) {
+            Log.e("MessageStore", "Failed to save messages", e)
+        }
+    }
+
+    private fun scheduleSave() {
+        pendingSave.getAndSet(saveScope.launch {
+            delay(SAVE_DELAY_MS)
+            saveToDisk()
+        })?.cancel()
+    }
+
     companion object {
+        private const val PREFS_NAME = "ham78_messages"
+        private const val KEY_MESSAGES = "messages_json"
+        private const val MAX_PERSISTED = 100
+        private const val SAVE_DELAY_MS = 2000L
+
+        @Volatile
         private var instance: MessageStore? = null
 
-        fun getInstance(): MessageStore {
-            if (instance == null) {
-                instance = MessageStore()
+        fun getInstance(context: Context? = null): MessageStore {
+            return instance ?: synchronized(this) {
+                instance ?: MessageStore(context?.applicationContext).also { instance = it }
             }
-            return instance!!
         }
     }
 }

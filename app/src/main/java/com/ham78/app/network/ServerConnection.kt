@@ -23,6 +23,7 @@ data class ServerConnection(
     val statusText: String get() = when (connectionState) {
         ConnectionState.CONNECTED -> "已连接"
         ConnectionState.CONNECTING -> "连接中..."
+        ConnectionState.RECONNECTING -> "重连中..."
         ConnectionState.DISCONNECTED -> "未连接"
     }
 

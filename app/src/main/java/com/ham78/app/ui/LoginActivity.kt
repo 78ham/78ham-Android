@@ -1,7 +1,6 @@
 package com.ham78.app.ui
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -47,12 +46,10 @@ class LoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val prefs = getSharedPreferences("ham78_settings", Context.MODE_PRIVATE)
-        val savedUsername = prefs.getString("username", "") ?: ""
-        val savedPassword = prefs.getString("password", "") ?: ""
-        val autoConnect = prefs.getBoolean("auto_connect", false)
+        val settingsRepository = SettingsRepository(this)
+        val settings = settingsRepository.loadSettings()
 
-        if (savedUsername.isNotEmpty() && savedPassword.isNotEmpty() && autoConnect) {
+        if (settings.username.isNotEmpty() && settings.password.isNotEmpty() && settings.autoConnect) {
             startActivity(Intent(this, MainActivity::class.java))
             finish()
             return
@@ -294,15 +291,6 @@ fun LoginScreen(
                                                     servers = servers
                                                 )
                                             )
-
-                                            prefs.edit()
-                                                .putString("username", username)
-                                                .putString("password", password)
-                                                .putString("server_address", serverAddress)
-                                                .putString("callsign", userInfo.callsign)
-                                                .putInt("dmr_id", userInfo.dmrId)
-                                                .putBoolean("auto_connect", true)
-                                                .apply()
 
                                             onLoginSuccess()
                                         },

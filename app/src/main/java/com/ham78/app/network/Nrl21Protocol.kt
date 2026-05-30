@@ -16,6 +16,19 @@ object Nrl21Protocol {
     const val DEFAULT_SSID = 179
     const val DEFAULT_DEVMODEL = 101   // Android 客户端设备型号 (100=小程序, 101=Android, 102=iOS, 103=Win)
 
+    // 协议头部偏移量
+    private const val OFF_HEADER = 0
+    private const val OFF_LENGTH = 4
+    private const val OFF_DMR_ID = 6
+    private const val OFF_TYPE = 20
+    private const val OFF_STATUS = 21
+    private const val OFF_COUNT = 22
+    private const val OFF_CALLSIGN = 24
+    private const val OFF_SSID = 30
+    private const val OFF_DEVMODEL = 31
+    private const val HEADER_LEN = 4
+    private const val CALLSIGN_LEN = 6
+
     // 包类型
     const val TYPE_VOICE = 1          // 语音数据 (G711)
     const val TYPE_HEARTBEAT = 2      // 心跳包
@@ -151,26 +164,26 @@ object Nrl21Protocol {
         buffer.order(ByteOrder.BIG_ENDIAN)
 
         // 写入固定头部 "NRL2"
-        writeString(buffer, 0, HEADER, 4)
+        writeString(buffer, OFF_HEADER, HEADER, HEADER_LEN)
         // 长度 (头部 + 数据总长度，与服务端 encodeNRL21 一致)
-        buffer.putShort(4, (FIXED_BUFFER_SIZE + dataSize).toShort())
+        buffer.putShort(OFF_LENGTH, (FIXED_BUFFER_SIZE + dataSize).toShort())
         // DMR ID (3字节)
-        writeUint24(buffer, 6, dmrId)
+        writeUint24(buffer, OFF_DMR_ID, dmrId)
         // 密码字段 (9-19 共11字节，ByteBuffer.allocate 已初始化为0)
 
         // type
-        buffer.put(20, type.toByte())
+        buffer.put(OFF_TYPE, type.toByte())
         // status
-        buffer.put(21, 1)
+        buffer.put(OFF_STATUS, 1)
         // count
-        buffer.putShort(22, 0)
+        buffer.putShort(OFF_COUNT, 0)
 
         // callSign (6字节)
-        writeString(buffer, 24, callSign, 6)
+        writeString(buffer, OFF_CALLSIGN, callSign, CALLSIGN_LEN)
         // ssid
-        buffer.put(30, ssid.toByte())
+        buffer.put(OFF_SSID, ssid.toByte())
         // devModel
-        buffer.put(31, devModel.toByte())
+        buffer.put(OFF_DEVMODEL, devModel.toByte())
 
         // 数据部分，从 FIXED_BUFFER_SIZE (48) 开始写入，避免覆盖头部
         if (data != null) {
@@ -191,18 +204,18 @@ object Nrl21Protocol {
         val buffer = ByteBuffer.wrap(data)
         buffer.order(ByteOrder.BIG_ENDIAN)
 
-        val header = readString(buffer, 0, 4)
+        val header = readString(buffer, OFF_HEADER, HEADER_LEN)
         if (header != HEADER) {
             return null
         }
 
-        val callSign = readString(buffer, 24, 6).trim()
-        val dmrId = readUint24(buffer, 6)
-        val type = data[20].toInt() and 0xFF
-        val ssid = data[30].toInt() and 0xFF
-        val devModel = data[31].toInt() and 0xFF
-        val status = data[21].toInt() and 0xFF
-        val count = ((data[22].toInt() and 0xFF) shl 8) or (data[23].toInt() and 0xFF)
+        val callSign = readString(buffer, OFF_CALLSIGN, CALLSIGN_LEN).trim()
+        val dmrId = readUint24(buffer, OFF_DMR_ID)
+        val type = data[OFF_TYPE].toInt() and 0xFF
+        val ssid = data[OFF_SSID].toInt() and 0xFF
+        val devModel = data[OFF_DEVMODEL].toInt() and 0xFF
+        val status = data[OFF_STATUS].toInt() and 0xFF
+        val count = ((data[OFF_COUNT].toInt() and 0xFF) shl 8) or (data[OFF_COUNT + 1].toInt() and 0xFF)
 
         val payloadData = if (data.size > FIXED_BUFFER_SIZE) {
             data.sliceArray(FIXED_BUFFER_SIZE until data.size)

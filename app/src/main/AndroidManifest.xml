@@ -27,10 +27,6 @@
     <!-- 按键监听（对讲机专用） -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- 存储权限（读取外部配置文件） -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
-
     <!-- Android 13+ 通知权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -67,14 +63,6 @@
             android:turnScreenOn="true"
             android:showWhenLocked="true"
             android:configChanges="orientation|screenSize|smallestScreenSize" />
-        
-        <activity
-            android:name=".ui.SettingsActivity"
-            android:exported="false"
-            android:launchMode="singleTop"
-            android:showOnLockScreen="true"
-            android:turnScreenOn="true"
-            android:showWhenLocked="true" />
         
         <!-- 对讲服务 -->
         <service

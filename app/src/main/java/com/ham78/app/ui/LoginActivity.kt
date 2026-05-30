@@ -1,14 +1,24 @@
 package com.ham78.app.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -17,8 +27,23 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -34,8 +59,16 @@ import androidx.core.content.ContextCompat
 import com.ham78.app.data.ServerConfig
 import com.ham78.app.data.SettingsRepository
 import com.ham78.app.network.ApiClient
-import com.ham78.app.ui.theme.*
-import kotlinx.coroutines.*
+import com.ham78.app.ui.theme.BrandPurple
+import com.ham78.app.ui.theme.Divider
+import com.ham78.app.ui.theme.Error
+import com.ham78.app.ui.theme.Surface
+import com.ham78.app.ui.theme.SurfaceCard
+import com.ham78.app.ui.theme.TextOnPrimary
+import com.ham78.app.ui.theme.TextPrimary
+import com.ham78.app.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.rememberCoroutineScope
 
 class LoginActivity : ComponentActivity() {
 
@@ -49,18 +82,23 @@ class LoginActivity : ComponentActivity() {
         val settingsRepository = SettingsRepository(this)
         val settings = settingsRepository.loadSettings()
 
+        val needsPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) != PackageManager.PERMISSION_GRANTED
+
+        if (needsPermission) {
+            requestPermissions(
+                arrayOf(
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ), 100
+            )
+        }
+
         if (settings.username.isNotEmpty() && settings.password.isNotEmpty() && settings.autoConnect) {
             startActivity(Intent(this, MainActivity::class.java))
             finish()
             return
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ), 100)
         }
 
         setContent {
@@ -95,8 +133,6 @@ fun LoginScreen(
     var errorMessage by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
 
-    val prefs = context.getSharedPreferences("ham78_settings", Context.MODE_PRIVATE)
-
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -119,7 +155,6 @@ fun LoginScreen(
         ) {
             Spacer(modifier = Modifier.height(64.dp))
 
-            // Logo 区域
             Text(
                 text = "78HAM",
                 color = BrandPurple,
@@ -137,7 +172,6 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            // 登录卡片
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(20.dp),
@@ -234,7 +268,6 @@ fun LoginScreen(
                         )
                     )
 
-                    // 错误消息
                     AnimatedVisibility(visible = errorMessage.isNotEmpty()) {
                         Text(
                             text = errorMessage,
@@ -243,7 +276,6 @@ fun LoginScreen(
                         )
                     }
 
-                    // 登录按钮
                     Button(
                         onClick = {
                             if (username.isEmpty() || password.isEmpty()) {
@@ -264,7 +296,6 @@ fun LoginScreen(
 
                                     result.fold(
                                         onSuccess = { userInfo ->
-                                            // 保存登录信息
                                             val settingsRepo = SettingsRepository(context)
                                             val currentSettings = settingsRepo.loadSettings()
                                             val serverConfig = ServerConfig(

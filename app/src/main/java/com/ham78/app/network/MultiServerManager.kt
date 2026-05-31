@@ -185,12 +185,10 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         connections[serverId]?.audioManager?.let { am ->
             _transmittingState.value = am.isTransmitting.value
             _receivingState.value = am.isReceiving.value
-            audioStateJob = scope.launch {
-                launch { am.isTransmitting.collect { _transmittingState.value = it } }
-            }
-            scope.launch {
-                am.isReceiving.collect { _receivingState.value = it }
-            }
+                audioStateJob = scope.launch {
+                    launch { am.isTransmitting.collect { _transmittingState.value = it } }
+                    launch { am.isReceiving.collect { _receivingState.value = it } }
+                }
         }
 
         connectionStates.keys.forEach { id ->

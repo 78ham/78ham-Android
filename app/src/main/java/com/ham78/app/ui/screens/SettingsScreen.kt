@@ -262,7 +262,7 @@ fun SettingsScreen() {
             Text("保存设置", fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
 
-        Spacer(modifier = Modifier.height(100.dp))
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 

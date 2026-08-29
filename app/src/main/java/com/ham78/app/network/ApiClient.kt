@@ -254,17 +254,19 @@ object ApiClient {
 
     // ============== 内部方法 ==============
 
-    private inline fun <T> apiCall(
+    private suspend inline fun <T> apiCall(
         serverHost: String? = null,
-        crossinline block: (String) -> T
-    ): Result<T> = try {
-        Result.success(block(serverHost ?: ""))
-    } catch (e: ApiException) {
-        Log.w(TAG, "API error: ${e.message}")
-        Result.failure(e)
-    } catch (e: Exception) {
-        Log.e(TAG, "API exception", e)
-        Result.failure(e)
+        crossinline block: suspend (String) -> T
+    ): Result<T> = withContext(Dispatchers.IO) {
+        try {
+            Result.success(block(serverHost ?: ""))
+        } catch (e: ApiException) {
+            Log.w(TAG, "API error: ${e.message}")
+            Result.failure(e)
+        } catch (e: Exception) {
+            Log.e(TAG, "API exception", e)
+            Result.failure(e)
+        }
     }
 
     private fun normalizeUrl(host: String): String = when {

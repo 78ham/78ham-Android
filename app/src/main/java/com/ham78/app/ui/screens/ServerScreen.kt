@@ -81,16 +81,7 @@ fun ServerScreen(
     var showAddDialog by remember { mutableStateOf(false) }
 
     Scaffold(
-        containerColor = Color.Transparent,
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showAddDialog = true },
-                containerColor = BrandPurple,
-                contentColor = TextOnPrimary
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "添加服务器")
-            }
-        }
+        containerColor = Color.Transparent
     ) { padding ->
         Column(
             modifier = Modifier
@@ -100,19 +91,42 @@ fun ServerScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "服务器管理",
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "服务器管理",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
 
-            Text(
-                text = "已连接 ${serverConnections.count { it.isOnline }} / ${serverConnections.size} 台服务器",
-                fontSize = 13.sp,
-                color = TextSecondary,
-                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
-            )
+                    Text(
+                        text = "已连接 ${serverConnections.count { it.isOnline }} / ${serverConnections.size} 台服务器",
+                        fontSize = 13.sp,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+
+                Button(
+                    onClick = { showAddDialog = true },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = "添加服务器",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("添加")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             if (serverConnections.isEmpty() && savedServers.isEmpty()) {
                 Box(
@@ -143,6 +157,9 @@ fun ServerScreen(
                 }
             } else {
                 LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(serverConnections) { conn ->
@@ -165,7 +182,7 @@ fun ServerScreen(
                         )
                     }
 
-                    item { Spacer(modifier = Modifier.height(80.dp)) }
+                    item { Spacer(modifier = Modifier.height(16.dp)) }
                 }
             }
         }

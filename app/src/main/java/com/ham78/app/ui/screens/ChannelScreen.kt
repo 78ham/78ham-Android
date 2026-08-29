@@ -20,11 +20,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -91,7 +93,7 @@ fun ChannelScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "频道列表",
                         fontSize = 22.sp,
@@ -120,6 +122,17 @@ fun ChannelScreen(
                             color = TextSecondary
                         )
                     }
+                }
+
+                IconButton(
+                    onClick = onRefresh,
+                    enabled = activeServer?.isOnline == true
+                ) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = "刷新频道",
+                        tint = if (activeServer?.isOnline == true) BrandPurple else TextSecondary.copy(alpha = 0.4f)
+                    )
                 }
             }
 
@@ -180,6 +193,9 @@ fun ChannelScreen(
                 }
             } else {
                 LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(filteredRooms) { room ->
@@ -207,7 +223,7 @@ fun ChannelScreen(
                         }
                     }
 
-                    item { Spacer(modifier = Modifier.height(80.dp)) }
+                    item { Spacer(modifier = Modifier.height(16.dp)) }
                 }
             }
         }

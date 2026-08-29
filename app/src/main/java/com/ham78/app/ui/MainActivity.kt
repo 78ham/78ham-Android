@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.ham78.app.service.TalkService
@@ -22,8 +25,8 @@ import com.ham78.app.ui.theme.BrandPurple
 
 class MainActivity : ComponentActivity() {
 
-    private var talkService: TalkService? = null
-    private var serviceBound = false
+    private var talkService by mutableStateOf<TalkService?>(null)
+    private var serviceBound by mutableStateOf(false)
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -58,12 +61,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
-        if (event != null) {
-            android.util.Log.d("MainActivity", "dispatchKeyEvent: keyCode=${event.keyCode} action=${event.action}")
-        }
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        android.util.Log.d("MainActivity", "dispatchKeyEvent: keyCode=${event.keyCode} action=${event.action}")
         val service = talkService
-        if (service != null && event != null && service.handleKeyEvent(event)) {
+        if (service != null && service.handleKeyEvent(event)) {
             return true
         }
         return super.dispatchKeyEvent(event)

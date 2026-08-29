@@ -21,48 +21,48 @@ class G711Codec {
                 }
             }
         }
-    }
 
-    private fun linear2alawInternal(sample: Int): Int {
-        var s = sample
-        var sign = 0
+        private fun linear2alawInternal(sample: Int): Int {
+            var s = sample
+            var sign = 0
 
-        if (s < 0) {
-            sign = 0x80
-            s = s.inv()
-        }
-
-        s = s shr 4
-
-        var ix = s
-        if (ix > 15) {
-            var iexp = 1
-            while (ix > 31) {
-                ix = ix shr 1
-                iexp++
+            if (s < 0) {
+                sign = 0x80
+                s = s.inv()
             }
-            ix -= 16
-            ix += iexp shl 4
+
+            s = s shr 4
+
+            var ix = s
+            if (ix > 15) {
+                var iexp = 1
+                while (ix > 31) {
+                    ix = ix shr 1
+                    iexp++
+                }
+                ix -= 16
+                ix += iexp shl 4
+            }
+
+            if (sign == 0) {
+                ix = ix or 0x80
+            }
+
+            return ix xor 0x55
         }
 
-        if (sign == 0) {
-            ix = ix or 0x80
+        private fun alaw2linearInternal(code: Int): Int {
+            val c = code xor 0x55
+            val seg = (c and 0x70) shr 4
+            val quant = c and 0x0f
+            var sample = (quant shl 4) or 0x08
+
+            if (seg > 0) {
+                sample = (sample + 0x100) shl (seg - 1)
+            }
+
+            return if ((c and 0x80) != 0) sample else -sample
         }
-
-        return ix xor 0x55
-    }
-
-    private fun alaw2linearInternal(code: Int): Int {
-        var c = code xor 0x55
-        val seg = (c and 0x70) shr 4
-        val quant = c and 0x0f
-        var sample = (quant shl 4) or 0x08
-
-        if (seg > 0) {
-            sample = (sample + 0x100) shl (seg - 1)
-        }
-
-        return if ((c and 0x80) != 0) sample else -sample
     }
 
     /**

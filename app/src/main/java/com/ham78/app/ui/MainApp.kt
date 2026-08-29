@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -60,9 +61,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.ham78.app.network.MessageStore
 import com.ham78.app.network.ServerConnection
 import com.ham78.app.service.TalkService
 import com.ham78.app.ui.screens.ChannelScreen
@@ -71,7 +72,6 @@ import com.ham78.app.ui.screens.ServerScreen
 import com.ham78.app.ui.screens.SettingsScreen
 import com.ham78.app.ui.theme.Background
 import com.ham78.app.ui.theme.BrandPurple
-import com.ham78.app.ui.theme.Connected
 import com.ham78.app.ui.theme.Disconnected
 import com.ham78.app.ui.theme.PttTransmitting
 import com.ham78.app.ui.theme.ServerOffline
@@ -103,6 +103,7 @@ fun MainApp(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val settingsRepository = remember { com.ham78.app.data.SettingsRepository(context) }
+    val settings by settingsRepository.settings.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = remember {
@@ -125,8 +126,8 @@ fun MainApp(
         serverConnections.find { it.serverId == activeServerId }
     }
 
-    val isConnected = remember(serverConnections) {
-        serverConnections.any { it.isOnline }
+    val isConnected = remember(activeServer) {
+        activeServer?.isOnline == true
     }
 
     var roomList by remember { mutableStateOf(listOf<com.ham78.app.network.ApiClient.RoomInfo>()) }
@@ -187,7 +188,9 @@ fun MainApp(
                                     Text(
                                         text = activeServer.name,
                                         fontSize = 13.sp,
-                                        color = TextSecondary
+                                        color = TextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -238,45 +241,59 @@ fun MainApp(
                 )
             },
             bottomBar = {
-                NavigationBar(
-                    containerColor = Surface,
-                    tonalElevation = 0.dp
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Surface)
                 ) {
-                    tabs.forEachIndexed { index, item ->
-                        NavigationBarItem(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            icon = {
-                                BadgedBox(
-                                    badge = {
-                                        when (item) {
-                                            is BottomNavItem.Servers -> {
-                                                val onlineCount = serverConnections.count { it.isOnline }
-                                                if (onlineCount > 0) {
-                                                    Badge { Text("$onlineCount") }
+                    PttControlBar(
+                        isConnected = isConnected,
+                        isTransmitting = isTransmitting,
+                        pulseScale = pulseScale,
+                        onPress = { talkService.startTransmitting() },
+                        onRelease = { talkService.stopTransmitting() }
+                    )
+
+                    NavigationBar(
+                        containerColor = Surface,
+                        tonalElevation = 0.dp
+                    ) {
+                        tabs.forEachIndexed { index, item ->
+                            NavigationBarItem(
+                                selected = selectedTab == index,
+                                onClick = { selectedTab = index },
+                                icon = {
+                                    BadgedBox(
+                                        badge = {
+                                            when (item) {
+                                                is BottomNavItem.Servers -> {
+                                                    val onlineCount = serverConnections.count { it.isOnline }
+                                                    if (onlineCount > 0) {
+                                                        Badge { Text("$onlineCount") }
+                                                    }
                                                 }
+                                                else -> {}
                                             }
-                                            else -> {}
                                         }
+                                    ) {
+                                        Icon(
+                                            if (selectedTab == index) item.selectedIcon else item.unselectedIcon,
+                                            contentDescription = item.title
+                                        )
                                     }
-                                ) {
-                                    Icon(
-                                        if (selectedTab == index) item.selectedIcon else item.unselectedIcon,
-                                        contentDescription = item.title
-                                    )
-                                }
-                            },
-                            label = {
-                                Text(item.title, fontSize = 11.sp)
-                            },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = BrandPurple,
-                                selectedTextColor = BrandPurple,
-                                indicatorColor = BrandPurple.copy(alpha = 0.1f),
-                                unselectedIconColor = TextSecondary,
-                                unselectedTextColor = TextSecondary
+                                },
+                                label = {
+                                    Text(item.title, fontSize = 11.sp)
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = BrandPurple,
+                                    selectedTextColor = BrandPurple,
+                                    indicatorColor = BrandPurple.copy(alpha = 0.1f),
+                                    unselectedIconColor = TextSecondary,
+                                    unselectedTextColor = TextSecondary
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
@@ -289,7 +306,7 @@ fun MainApp(
                 when (selectedTab) {
                     0 -> ServerScreen(
                         serverConnections = serverConnections,
-                        savedServers = settingsRepository.loadServerList(),
+                        savedServers = settings.servers,
                         activeServerId = activeServerId,
                         onConnect = { config ->
                             scope.launch { talkService.connectToServer(config) }
@@ -347,65 +364,84 @@ fun MainApp(
             }
         }
 
+    }
+}
+
+@Composable
+private fun PttControlBar(
+    isConnected: Boolean,
+    isTransmitting: Boolean,
+    pulseScale: Float,
+    onPress: () -> Unit,
+    onRelease: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
         Box(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 80.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(180.dp)
-                    .height(56.dp)
-                    .scale(if (isTransmitting) pulseScale else 1f)
-                    .shadow(
-                        elevation = if (isConnected) 8.dp else 2.dp,
-                        shape = RoundedCornerShape(28.dp),
-                        ambientColor = if (isTransmitting) PttTransmitting else BrandPurple,
-                        spotColor = if (isTransmitting) PttTransmitting else BrandPurple
-                    )
-                    .clip(RoundedCornerShape(28.dp))
-                    .background(
-                        when {
-                            isTransmitting -> PttTransmitting
-                            isConnected -> BrandPurple
-                            else -> Disconnected
-                        }
-                    )
-                    .pointerInput(isConnected) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                awaitFirstDown(requireUnconsumed = false)
-                                if (!isConnected) continue
-                                talkService.startTransmitting()
+                .fillMaxWidth()
+                .height(52.dp)
+                .scale(if (isTransmitting) pulseScale else 1f)
+                .shadow(
+                    elevation = if (isConnected) 8.dp else 2.dp,
+                    shape = RoundedCornerShape(26.dp),
+                    ambientColor = if (isTransmitting) PttTransmitting else BrandPurple,
+                    spotColor = if (isTransmitting) PttTransmitting else BrandPurple
+                )
+                .clip(RoundedCornerShape(26.dp))
+                .background(
+                    when {
+                        isTransmitting -> PttTransmitting
+                        isConnected -> BrandPurple
+                        else -> Disconnected
+                    }
+                )
+                .pointerInput(isConnected) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitFirstDown(requireUnconsumed = false)
+                            if (!isConnected) {
                                 waitForUpOrCancellation()
-                                talkService.stopTransmitting()
+                                continue
+                            }
+                            onPress()
+                            try {
+                                waitForUpOrCancellation()
+                            } finally {
+                                onRelease()
                             }
                         }
-                    },
-                contentAlignment = Alignment.Center
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        if (isTransmitting) Icons.Filled.Mic else Icons.Filled.MicOff,
-                        contentDescription = "PTT",
-                        modifier = Modifier.size(22.dp),
-                        tint = TextOnPrimary
-                    )
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = when {
-                            isTransmitting -> "松开停止"
-                            isConnected -> "按住说话"
-                            else -> "未连接"
-                        },
-                        color = TextOnPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                Icon(
+                    if (isTransmitting) Icons.Filled.Mic else Icons.Filled.MicOff,
+                    contentDescription = "PTT",
+                    modifier = Modifier.size(22.dp),
+                    tint = TextOnPrimary
+                )
+                androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = when {
+                        isTransmitting -> "松开停止"
+                        isConnected -> "按住说话"
+                        else -> "未连接"
+                    },
+                    color = TextOnPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }

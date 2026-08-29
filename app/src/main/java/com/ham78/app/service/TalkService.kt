@@ -431,7 +431,10 @@ class TalkService : Service() {
         pttController = PttController(this)
         pttController.initialize(
             listener = object : PttController.PttListener {
-                override fun onPttPressed() = startTransmitting()
+                override fun onPttPressed() {
+                    startTransmitting()
+                }
+
                 override fun onPttReleased() = stopTransmitting()
                 override fun onPttLongPress() {
                     Log.d(TAG, "PTT long press detected")
@@ -478,7 +481,10 @@ class TalkService : Service() {
 
     private fun setupPttButtonReceiver() {
         PttButtonReceiver.listener = object : PttButtonReceiver.PttButtonListener {
-            override fun onPttButtonPressed() = startTransmitting()
+            override fun onPttButtonPressed() {
+                startTransmitting()
+            }
+
             override fun onPttButtonReleased() = stopTransmitting()
         }
 

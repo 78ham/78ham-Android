@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -35,11 +36,8 @@ class UdpClient {
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _receivedPackets = MutableStateFlow<Nrl21Protocol.Packet?>(null)
-    val receivedPackets: StateFlow<Nrl21Protocol.Packet?> = _receivedPackets.asStateFlow()
-
     private val isRunning = AtomicBoolean(false)
-    private var scope: CoroutineScope? = null
+    private val clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var receiveJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -53,6 +51,7 @@ class UdpClient {
 
     private var lastPacketTime = 0L
     private var reconnectAttempts = 0
+    private var lastSendWarnTime = 0L
 
     interface PacketListener {
         fun onPacketReceived(packet: Nrl21Protocol.Packet)
@@ -83,18 +82,21 @@ class UdpClient {
             _connectionState.value = ConnectionState.CONNECTING
 
             serverAddress = InetAddress.getByName(serverHost)
-            socket = DatagramSocket().apply { soTimeout = RECEIVE_TIMEOUT_MS }
+            socket = DatagramSocket().apply {
+                soTimeout = RECEIVE_TIMEOUT_MS
+                try {
+                    receiveBufferSize = 256 * 1024
+                    sendBufferSize = 256 * 1024
+                } catch (_: Exception) {}
+            }
 
             isRunning.set(true)
             lastPacketTime = System.currentTimeMillis()
             reconnectAttempts = 0
 
-            val newScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            scope = newScope
-
-            startReceiving(newScope)
-            startHeartbeat(newScope)
-            startConnectionMonitor(newScope)
+            startReceiving(clientScope)
+            startHeartbeat(clientScope)
+            startConnectionMonitor(clientScope)
 
             _connectionState.value = ConnectionState.CONNECTED
             Log.d(TAG, "Connected to $serverHost:$port (DMR:$dmrId)")
@@ -126,9 +128,6 @@ class UdpClient {
         socket = null
         serverAddress = null
 
-        scope?.cancel()
-        scope = null
-
         if (clearState) {
             _connectionState.value = ConnectionState.DISCONNECTED
             Log.d(TAG, "Disconnected")
@@ -153,15 +152,24 @@ class UdpClient {
         }
     }
 
+    /** 高频路径（语音每秒 50 帧）告警节流：同一告警 2 秒内只记录一次，避免刷爆 logcat */
+    private fun warnThrottled(message: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastSendWarnTime > 2000) {
+            lastSendWarnTime = now
+            Log.w(TAG, message)
+        }
+    }
+
     fun sendAudioData(audioData: ByteArray, isOpus: Boolean = false) {
         if (_connectionState.value != ConnectionState.CONNECTED) {
-            Log.w(TAG, "sendAudioData: not connected")
+            warnThrottled("sendAudioData: not connected")
             return
         }
         val type = if (isOpus) Nrl21Protocol.TYPE_OPUS else Nrl21Protocol.TYPE_VOICE
         val packet = Nrl21Protocol.createPacket(type, callsign, ssid, devModel, dmrId, audioData)
         if (!sendPacket(packet)) {
-            Log.e(TAG, "sendAudioData: sendPacket failed, size=${packet.size}")
+            warnThrottled("sendAudioData: sendPacket failed, size=${packet.size}")
         }
     }
 
@@ -186,15 +194,19 @@ class UdpClient {
 
             while (isRunning.get() && isActive) {
                 try {
+                    // 必须每次重置缓冲与长度，防止上次短包导致后续长语音包被截断
+                    packet.setData(buffer, 0, buffer.size)
                     socket?.receive(packet) ?: break
 
                     lastPacketTime = System.currentTimeMillis()
 
                     val data = packet.data.copyOf(packet.length)
                     Nrl21Protocol.decodePacket(data)?.let { nrlPacket ->
-                        _receivedPackets.value = nrlPacket
                         packetListener?.onPacketReceived(nrlPacket)
                     }
+                } catch (_: SocketTimeoutException) {
+                    // 超时等待下一个数据包，属于正常现象
+                    continue
                 } catch (_: CancellationException) {
                     break
                 } catch (e: Exception) {
@@ -263,11 +275,16 @@ class UdpClient {
 
     private fun reconnect() {
         if (reconnectJob?.isActive == true) return
-        reconnectJob = scope?.launch {
+        reconnectJob = clientScope.launch {
             if (connect(serverHost, serverPort, dmrId, callsign, ssid, devModel)) {
                 Log.d(TAG, "Reconnected successfully")
             }
         }
+    }
+
+    fun release() {
+        disconnect()
+        clientScope.cancel()
     }
 
     fun isConnected(): Boolean = _connectionState.value == ConnectionState.CONNECTED

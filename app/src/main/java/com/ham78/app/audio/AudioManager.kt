@@ -14,9 +14,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 
 /**
  * 音频管理器
@@ -33,7 +32,10 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
     private val player = AudioPlayer(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val g711Codec = G711Codec()
+    private val opusCodec = OpusCodec()
 
+    // 设置线程写、录音/接收线程读，必须保证可见性
+    @Volatile
     private var codec = AudioCodec.G711
 
     private val _isTransmitting = MutableStateFlow(false)
@@ -42,9 +44,13 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
     private val _isReceiving = MutableStateFlow(false)
     val isReceiving: StateFlow<Boolean> = _isReceiving.asStateFlow()
 
+    val currentPlayingClipId: StateFlow<String?> = player.currentPlayingClipId
+
     private val _lastReceivedCallsign = MutableStateFlow<String>("")
     val lastReceivedCallsign: StateFlow<String> = _lastReceivedCallsign.asStateFlow()
 
+    // 接收线程写、超时监护协程读，必须保证可见性
+    @Volatile
     private var lastAudioTime = 0L
     private var receiveTimeoutJob: Job? = null
     private var playerReady = false
@@ -53,18 +59,16 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
         override fun onAudioData(pcmData: ByteArray) {
             if (!_isTransmitting.value) return
             if (pcmData.size >= AudioRecorder.BYTES_PER_FRAME) {
-                val frameData = pcmData.copyOf(AudioRecorder.BYTES_PER_FRAME)
+                // 长度恰好为一帧时直接使用，避免每帧一次数组拷贝
+                val frameData = if (pcmData.size == AudioRecorder.BYTES_PER_FRAME) {
+                    pcmData
+                } else {
+                    pcmData.copyOf(AudioRecorder.BYTES_PER_FRAME)
+                }
 
                 val encodedData = when (codec) {
-                    AudioCodec.G711 -> {
-                        val samples = ShortArray(frameData.size / 2)
-                        ByteBuffer.wrap(frameData)
-                            .order(ByteOrder.LITTLE_ENDIAN)
-                            .asShortBuffer()
-                            .get(samples)
-                        g711Codec.encode(samples)
-                    }
-                    AudioCodec.OPUS -> frameData
+                    AudioCodec.G711 -> g711Codec.encodePcmToAlaw(frameData)
+                    AudioCodec.OPUS -> opusCodec.encode(frameData)
                 }
 
                 udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
@@ -131,11 +135,19 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
         _isReceiving.value = true
         lastAudioTime = System.currentTimeMillis()
 
-        receiveTimeoutJob?.cancel()
-        receiveTimeoutJob = scope.launch {
-            delay(RECEIVE_TIMEOUT_MS)
-            if (System.currentTimeMillis() - lastAudioTime >= RECEIVE_TIMEOUT_MS) {
-                _isReceiving.value = false
+        // 语音包每秒多达 50 个：仅在无活动监护协程时启动，
+        // 动态计算剩余超时毫秒，保证在静默恰好达到阈值时立即解除 RX 高亮
+        if (receiveTimeoutJob?.isActive != true) {
+            receiveTimeoutJob = scope.launch {
+                while (isActive) {
+                    val elapsed = System.currentTimeMillis() - lastAudioTime
+                    val remaining = RECEIVE_TIMEOUT_MS - elapsed
+                    if (remaining <= 0) {
+                        _isReceiving.value = false
+                        break
+                    }
+                    delay(remaining)
+                }
             }
         }
 
@@ -149,28 +161,25 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
      */
     fun decodeToPcm(data: ByteArray, type: Int): ByteArray? {
         return when (type) {
-            Nrl21Protocol.TYPE_VOICE -> {
-                val samples = ShortArray(data.size)
-                for (i in data.indices) {
-                    samples[i] = g711Codec.alaw2linear(data[i].toInt() and 0xFF).toShort()
-                }
-                val buf = ByteBuffer.allocate(samples.size * 2)
-                buf.order(ByteOrder.LITTLE_ENDIAN)
-                buf.asShortBuffer().put(samples)
-                buf.array()
-            }
-            Nrl21Protocol.TYPE_OPUS -> data
+            Nrl21Protocol.TYPE_VOICE -> g711Codec.decodeAlawToPcm(data)
+            Nrl21Protocol.TYPE_OPUS -> opusCodec.decode(data)
             else -> null
         }
     }
 
     /** 回放一段已缓存的 PCM 语音（语音回放） */
-    fun playClip(pcm: ByteArray) {
+    fun playClip(pcm: ByteArray, clipId: String = "") {
         if (_isTransmitting.value) return
-        player.playClip(pcm)
+        player.playClip(pcm, clipId)
+    }
+
+    fun stopClip() {
+        player.stopClip()
     }
 
     fun clearReceivingState() {
+        receiveTimeoutJob?.cancel()
+        receiveTimeoutJob = null
         _isReceiving.value = false
     }
 

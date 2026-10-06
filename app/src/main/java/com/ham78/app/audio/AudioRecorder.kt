@@ -20,8 +20,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
@@ -142,27 +140,26 @@ class AudioRecorder(private val context: Context) {
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
 
                 if (read > 0) {
-                    val data = buffer.copyOf(read)
-
-                    val samples = ShortArray(data.size / 2)
-                    ByteBuffer.wrap(data)
-                        .order(ByteOrder.LITTLE_ENDIAN)
-                        .asShortBuffer()
-                        .get(samples)
-
+                    val sampleCount = read / 2
                     var sum = 0L
-                    for (s in samples) { 
-                        sum += s.toLong() * s.toLong() 
+                    for (i in 0 until sampleCount) {
+                        val lo = buffer[i * 2].toInt() and 0xFF
+                        val hi = buffer[i * 2 + 1].toInt()
+                        val s = ((hi shl 8) or lo).toShort().toLong()
+                        sum += s * s
                     }
-                    val rms = sqrt(sum.toDouble() / samples.size).toInt()
+                    val rms = if (sampleCount > 0) {
+                        sqrt(sum.toDouble() / sampleCount).toInt()
+                    } else 0
 
                     if (rms >= NOISE_GATE_THRESHOLD) {
                         silenceFrames = 0
-                        audioDataListener?.onAudioData(data)
+                        // 仅在超过噪声门时分配有效帧拷贝，静音期零分配
+                        audioDataListener?.onAudioData(buffer.copyOf(read))
                     } else {
                         silenceFrames++
                         if (silenceFrames <= hangoverFrames) {
-                            audioDataListener?.onAudioData(data)
+                            audioDataListener?.onAudioData(buffer.copyOf(read))
                         }
                     }
                 }

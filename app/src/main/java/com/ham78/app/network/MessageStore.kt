@@ -104,13 +104,13 @@ class MessageStore(private val context: Context? = null) {
         }.sortedBy { it.timestampMs }
 
     private fun emitState() {
-        val all = collectAllMessages().takeLast(500)
-        _allMessages.value = all
-
-        val byServer = messages.mapValues { (_, msgs) ->
+        // 单次快照：所有服务器消息只做一遍加锁拷贝，all 与 byServer 共享同一份快照，
+        // 避免每条消息触发两次全量列表复制 + 排序
+        val snapshot = messages.mapValues { (_, msgs) ->
             synchronized(msgs) { msgs.toList() }
         }
-        _serverMessages.value = byServer
+        _allMessages.value = snapshot.values.flatten().sortedBy { it.timestampMs }.takeLast(500)
+        _serverMessages.value = snapshot
     }
 
     private fun loadFromDisk() {

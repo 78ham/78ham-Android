@@ -80,11 +80,42 @@ class G711Codec {
     }
 
     /**
+     * 直接从小端 PCM 字节流编码为 A-law（零中间分配热路径）。
+     * 省去 ShortArray 与 ByteBuffer 的每帧分配，录音线程每 20ms 调用一次。
+     */
+    fun encodePcmToAlaw(pcmBytes: ByteArray): ByteArray {
+        val sampleCount = pcmBytes.size / 2
+        val encoded = ByteArray(sampleCount)
+        for (i in 0 until sampleCount) {
+            val lo = pcmBytes[i * 2].toInt() and 0xFF
+            val hi = pcmBytes[i * 2 + 1].toInt()
+            val sample = (hi shl 8) or lo
+            val index = (sample + 32768) and 0xffff
+            encoded[i] = encodeTable[index]
+        }
+        return encoded
+    }
+
+    /**
      * 解码 A-law 格式为线性 PCM 采样
      * @param code A-law 编码字节
      * @return 线性 PCM 采样值（16-bit signed）
      */
     fun alaw2linear(code: Int): Int {
         return decodeTable[code and 0xff].toInt()
+    }
+
+    /**
+     * 批量解码 A-law 字节流为小端 PCM 字节流（查表 + 单次输出分配）。
+     * 接收线程每个语音包调用，省去 ShortArray 与 ByteBuffer 中间分配。
+     */
+    fun decodeAlawToPcm(alaw: ByteArray): ByteArray {
+        val out = ByteArray(alaw.size * 2)
+        for (i in alaw.indices) {
+            val v = decodeTable[alaw[i].toInt() and 0xFF].toInt()
+            out[i * 2] = (v and 0xFF).toByte()
+            out[i * 2 + 1] = (v shr 8).toByte()
+        }
+        return out
     }
 }

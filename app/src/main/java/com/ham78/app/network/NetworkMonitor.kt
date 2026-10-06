@@ -20,11 +20,22 @@ class NetworkMonitor(private val context: Context) {
         private const val TAG = "NetworkMonitor"
     }
 
-    private val _networkAvailable = MutableStateFlow(true)
-    val networkAvailable: StateFlow<Boolean> = _networkAvailable.asStateFlow()
-
     private val connectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    private val isInitialConnected: Boolean
+        get() {
+            return try {
+                val activeNet = connectivityManager.activeNetwork ?: return false
+                val caps = connectivityManager.getNetworkCapabilities(activeNet) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } catch (_: Exception) {
+                true
+            }
+        }
+
+    private val _networkAvailable = MutableStateFlow(isInitialConnected)
+    val networkAvailable: StateFlow<Boolean> = _networkAvailable.asStateFlow()
 
     private var callback: ConnectivityManager.NetworkCallback? = null
 

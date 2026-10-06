@@ -70,12 +70,17 @@ class PttController(private val context: Context) {
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-    private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    private val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+        vm?.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }
     private var wakeLock: PowerManager.WakeLock? = null
 
     private var mediaButtonReceiver: BroadcastReceiver? = null
     private var mtkPttReceiver: BroadcastReceiver? = null
-    private var volumeChangeReceiver: BroadcastReceiver? = null
     private var isReleased = false
 
     private var pttPressTime = 0L
@@ -160,6 +165,7 @@ class PttController(private val context: Context) {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun createWakeLock() {
         if (wakeLock == null && !isReleased) {
             wakeLock = powerManager.newWakeLock(
@@ -185,14 +191,15 @@ class PttController(private val context: Context) {
         mediaButtonReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
-                    intent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
-                        ?.let { onKeyEvent(it) }
+                    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    }
+                    keyEvent?.let { onKeyEvent(it) }
                 }
             }
-        }
-
-        volumeChangeReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) { }
         }
 
         try {
@@ -213,8 +220,14 @@ class PttController(private val context: Context) {
                 addAction("android.intent.action.PTT.down")
                 addAction("android.intent.action.PTT.up")
             }
-            context.registerReceiver(mtkPttReceiver, pttFilter)
-        } catch (_: Exception) { }
+            // Android 14+ 注册非系统广播必须显式指定 export 标志，否则抛 SecurityException
+            androidx.core.content.ContextCompat.registerReceiver(
+                context, mtkPttReceiver, pttFilter,
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "register mtkPttReceiver failed", e)
+        }
     }
 
     fun release() {
@@ -222,13 +235,12 @@ class PttController(private val context: Context) {
         releaseWakeLock()
         wakeLock = null
 
-        listOfNotNull(mediaButtonReceiver, mtkPttReceiver, volumeChangeReceiver).forEach {
+        listOfNotNull(mediaButtonReceiver, mtkPttReceiver).forEach {
             try { context.unregisterReceiver(it) } catch (_: Exception) { }
         }
 
         mediaButtonReceiver = null
         mtkPttReceiver = null
-        volumeChangeReceiver = null
         pttListener = null
     }
 }

@@ -1,5 +1,14 @@
 package com.ham78.app.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,10 +30,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -43,6 +56,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,7 +82,8 @@ fun MessageScreen(
     isConnected: Boolean,
     onSendMessage: (String) -> Unit,
     onSendLocation: () -> Unit,
-    onReplayVoice: (String) -> Unit = {}
+    onReplayVoice: (String) -> Unit = {},
+    playingVoiceClipId: String? = null
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -125,7 +142,7 @@ fun MessageScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            Icons.Filled.Send,
+                            Icons.AutoMirrored.Filled.Send,
                             contentDescription = null,
                             modifier = Modifier.size(48.dp),
                             tint = TextSecondary.copy(alpha = 0.3f)
@@ -153,7 +170,11 @@ fun MessageScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(messages, key = { it.id }) { msg ->
-                        MessageBubble(message = msg, onReplayVoice = onReplayVoice)
+                        MessageBubble(
+                            message = msg,
+                            onReplayVoice = onReplayVoice,
+                            playingVoiceClipId = playingVoiceClipId
+                        )
                     }
                     item { Spacer(modifier = Modifier.height(8.dp)) }
                 }
@@ -163,6 +184,7 @@ fun MessageScreen(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .imePadding()
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     shape = RoundedCornerShape(24.dp),
                     colors = CardDefaults.cardColors(containerColor = Surface),
@@ -224,7 +246,7 @@ fun MessageScreen(
                                 )
                         ) {
                             Icon(
-                                Icons.Filled.Send,
+                                Icons.AutoMirrored.Filled.Send,
                                 contentDescription = "发送",
                                 tint = TextOnPrimary,
                                 modifier = Modifier.size(18.dp)
@@ -242,10 +264,15 @@ fun MessageScreen(
 @Composable
 fun MessageBubble(
     message: MessageStore.TextMessage,
-    onReplayVoice: (String) -> Unit = {}
+    onReplayVoice: (String) -> Unit = {},
+    playingVoiceClipId: String? = null
 ) {
     val isPlayableVoice = message.type == MessageStore.MessageType.VOICE &&
         message.voiceClipId.isNotEmpty()
+    val isPlayingThisVoice = isPlayableVoice &&
+        playingVoiceClipId != null &&
+        playingVoiceClipId == message.voiceClipId
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -278,7 +305,7 @@ fun MessageBubble(
 
         Column(
             modifier = Modifier
-                .widthIn(max = 280.dp)
+                .widthIn(max = if (message.type == MessageStore.MessageType.LOCATION) 300.dp else 280.dp)
                 .clip(
                     RoundedCornerShape(
                         topStart = if (message.isSelf) 14.dp else 4.dp,
@@ -316,17 +343,39 @@ fun MessageBubble(
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(2.dp))
             }
 
-            if (isPlayableVoice) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Filled.PlayArrow,
-                        contentDescription = "回放语音",
-                        tint = if (message.isSelf) TextOnPrimary else BrandPurple,
-                        modifier = Modifier.size(20.dp)
+            when (message.type) {
+                MessageStore.MessageType.VOICE -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (isPlayingThisVoice) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (isPlayingThisVoice) "暂停" else "回放语音",
+                            tint = if (message.isSelf) TextOnPrimary else BrandPurple,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = message.content,
+                            color = if (message.isSelf) TextOnPrimary else TextPrimary,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        VoiceWaveformBars(
+                            isPlaying = isPlayingThisVoice,
+                            color = if (message.isSelf) TextOnPrimary else BrandPurple
+                        )
+                    }
+                }
+                MessageStore.MessageType.LOCATION -> {
+                    LocationBubbleContent(
+                        content = message.content,
+                        isSelf = message.isSelf
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                }
+                else -> {
                     Text(
                         text = message.content,
                         color = if (message.isSelf) TextOnPrimary else TextPrimary,
@@ -334,13 +383,6 @@ fun MessageBubble(
                         lineHeight = 20.sp
                     )
                 }
-            } else {
-                Text(
-                    text = message.content,
-                    color = if (message.isSelf) TextOnPrimary else TextPrimary,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
-                )
             }
 
             Text(
@@ -349,6 +391,205 @@ fun MessageBubble(
                 color = if (message.isSelf) TextOnPrimary.copy(alpha = 0.6f) else TextSecondary.copy(alpha = 0.6f),
                 modifier = Modifier.align(Alignment.End)
             )
+        }
+    }
+}
+
+/**
+ * 语音跳动声波波形小组件
+ */
+@Composable
+fun VoiceWaveformBars(
+    isPlaying: Boolean,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "voiceWave")
+    val h1 by transition.animateFloat(
+        initialValue = 4f,
+        targetValue = 14f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(280, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "h1"
+    )
+    val h2 by transition.animateFloat(
+        initialValue = 12f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(340, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "h2"
+    )
+    val h3 by transition.animateFloat(
+        initialValue = 6f,
+        targetValue = 16f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(240, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "h3"
+    )
+
+    Row(
+        modifier = modifier.height(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val bars = if (isPlaying) listOf(h1, h2, h3) else listOf(5f, 9f, 6f)
+        bars.forEach { h ->
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(h.dp)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(color.copy(alpha = if (isPlaying) 0.9f else 0.4f))
+            )
+        }
+    }
+}
+
+/**
+ * 位置卡片气泡内容：坐标高亮展示 + 快速复制 + 唤起外部地图
+ */
+@Composable
+fun LocationBubbleContent(
+    content: String,
+    isSelf: Boolean
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    // 正则提取浮点数经纬度
+    val regex = Regex("(-?\\d+(?:\\.\\d+)?)[,\\s，]+(-?\\d+(?:\\.\\d+)?)")
+    val match = regex.find(content)
+    val lat = match?.groupValues?.getOrNull(1)
+    val lng = match?.groupValues?.getOrNull(2)
+
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                Icons.Filled.LocationOn,
+                contentDescription = null,
+                tint = if (isSelf) TextOnPrimary else BrandCyan,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = "位置分享",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isSelf) TextOnPrimary else BrandCyan
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (isSelf) Color.Black.copy(alpha = 0.15f) else Color.Black.copy(alpha = 0.25f),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                if (lat != null && lng != null) {
+                    Text(
+                        text = "纬度: $lat",
+                        fontSize = 12.sp,
+                        color = if (isSelf) TextOnPrimary else TextPrimary,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "经度: $lng",
+                        fontSize = 12.sp,
+                        color = if (isSelf) TextOnPrimary else TextPrimary,
+                        fontWeight = FontWeight.Medium
+                    )
+                } else {
+                    Text(
+                        text = content,
+                        fontSize = 13.sp,
+                        color = if (isSelf) TextOnPrimary else TextPrimary
+                    )
+                }
+            }
+        }
+
+        if (lat != null && lng != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 复制坐标
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = (if (isSelf) TextOnPrimary else BrandPurple).copy(alpha = 0.15f),
+                    modifier = Modifier.clickable {
+                        clipboardManager.setText(AnnotatedString("$lat, $lng"))
+                        Toast.makeText(context, "坐标已复制: $lat, $lng", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.ContentCopy,
+                            contentDescription = "复制",
+                            tint = if (isSelf) TextOnPrimary else BrandPurple,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "复制",
+                            fontSize = 11.sp,
+                            color = if (isSelf) TextOnPrimary else BrandPurple,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // 打开外部地图
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = (if (isSelf) TextOnPrimary else BrandCyan).copy(alpha = 0.15f),
+                    modifier = Modifier.clickable {
+                        try {
+                            val uri = Uri.parse("geo:$lat,$lng?q=$lat,$lng(业余电台位置)")
+                            val mapIntent = Intent(Intent.ACTION_VIEW, uri)
+                            context.startActivity(mapIntent)
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "未找到可用地图应用", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Map,
+                            contentDescription = "地图",
+                            tint = if (isSelf) TextOnPrimary else BrandCyan,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "导航",
+                            fontSize = 11.sp,
+                            color = if (isSelf) TextOnPrimary else BrandCyan,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -22,7 +22,8 @@ object ApiClient {
     private val gson = Gson()
 
     // Token 管理（按服务器存储，支持多服务器同时登录）
-    private val serverTokens = mutableMapOf<String, String>()
+    // 多台服务器可能在不同 IO 线程并发登录，必须使用线程安全的 Map
+    private val serverTokens = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     fun getTokenForServer(serverHost: String): String =
         serverTokens[normalizeUrl(serverHost)] ?: ""
@@ -296,6 +297,7 @@ object ApiClient {
             headers.forEach { (key, value) -> setRequestProperty(key, value) }
         }
 
+        var reusable = false
         try {
             if (body != null && method == "POST") {
                 connection.doOutput = true
@@ -320,9 +322,12 @@ object ApiClient {
                 throw ApiException("HTTP $statusCode")
             }
 
+            // 完整读取响应后不断开底层连接：平台 keep-alive 池可复用 TLS 会话，
+            // 5 秒周期的设备/群组轮询省去重复 TCP+TLS 握手，延迟显著降低
+            reusable = true
             return response
         } finally {
-            connection.disconnect()
+            if (!reusable) connection.disconnect()
         }
     }
 

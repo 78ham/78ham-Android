@@ -18,22 +18,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Storage
-import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -58,8 +57,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,8 +70,10 @@ import com.ham78.app.network.ServerConnection
 import com.ham78.app.service.TalkService
 import com.ham78.app.ui.screens.ChannelScreen
 import com.ham78.app.ui.screens.MessageScreen
+import com.ham78.app.ui.screens.PttScreen
 import com.ham78.app.ui.screens.ServerScreen
 import com.ham78.app.ui.screens.SettingsScreen
+import com.ham78.app.ui.screens.VoiceWaveformBars
 import com.ham78.app.ui.theme.Background
 import com.ham78.app.ui.theme.BrandPurple
 import com.ham78.app.ui.theme.Disconnected
@@ -88,9 +92,9 @@ sealed class BottomNavItem(
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector
 ) {
-    object Servers : BottomNavItem("服务器", Icons.Filled.Storage, Icons.Outlined.Storage)
+    object Ptt : BottomNavItem("PTT", Icons.Filled.Mic, Icons.Outlined.Mic)
     object Channels : BottomNavItem("频道", Icons.Filled.Groups, Icons.Outlined.Groups)
-    object Messages : BottomNavItem("消息", Icons.Filled.Chat, Icons.Outlined.Chat)
+    object Servers : BottomNavItem("服务器", Icons.Filled.Storage, Icons.Outlined.Storage)
     object Settings : BottomNavItem("设置", Icons.Filled.Settings, Icons.Outlined.Settings)
 }
 
@@ -108,9 +112,9 @@ fun MainApp(
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = remember {
         listOf(
-            BottomNavItem.Servers,
+            BottomNavItem.Ptt,
             BottomNavItem.Channels,
-            BottomNavItem.Messages,
+            BottomNavItem.Servers,
             BottomNavItem.Settings
         )
     }
@@ -118,9 +122,9 @@ fun MainApp(
     val serverConnections by talkService.serverConnections.collectAsState()
     val activeServerId by talkService.activeServerId.collectAsState()
     val textMessages by talkService.textMessages.collectAsState()
-
-    var isTransmitting by remember { mutableStateOf(false) }
-    var isReceiving by remember { mutableStateOf(false) }
+    val isTransmitting by talkService.transmittingState.collectAsState()
+    val isReceiving by talkService.receivingState.collectAsState()
+    val playingVoiceClipId by talkService.playingVoiceClipId.collectAsState()
 
     val activeServer = remember(serverConnections, activeServerId) {
         serverConnections.find { it.serverId == activeServerId }
@@ -130,37 +134,34 @@ fun MainApp(
         activeServer?.isOnline == true
     }
 
-    var roomList by remember { mutableStateOf(listOf<com.ham78.app.network.ApiClient.RoomInfo>()) }
+    // 各服务器的频道列表缓存: serverId -> 频道列表
+    var roomLists by remember {
+        mutableStateOf<Map<String, List<com.ham78.app.network.ApiClient.RoomInfo>>>(emptyMap())
+    }
+    var loadingRoomServers by remember { mutableStateOf(setOf<String>()) }
 
-    LaunchedEffect(activeServerId) {
-        if (activeServerId.isNotEmpty()) {
-            launch {
-                talkService.transmittingState.collect { isTransmitting = it }
-            }
-            launch {
-                talkService.receivingState.collect { isReceiving = it }
-            }
-        } else {
-            isTransmitting = false
-            isReceiving = false
+    fun refreshRoomList(serverId: String) {
+        if (serverId in loadingRoomServers) return
+        loadingRoomServers = loadingRoomServers + serverId
+        scope.launch {
+            val list = talkService.loadRoomList(serverId)
+            roomLists = roomLists + (serverId to list)
+            loadingRoomServers = loadingRoomServers - serverId
         }
     }
 
-    LaunchedEffect(activeServer?.isLoggedIn, activeServerId) {
-        if (activeServer?.isLoggedIn == true && activeServerId.isNotEmpty()) {
-            roomList = talkService.loadRoomList(activeServerId)
+    // 为所有已登录服务器加载频道列表，并清理已断开服务器的缓存。
+    // 仅在键集合实际变化时更新状态，避免每 5 秒的连接刷新触发无谓重组
+    LaunchedEffect(serverConnections) {
+        val connectedIds = serverConnections.map { it.serverId }.toSet()
+        val staleKeys = roomLists.keys - connectedIds
+        if (staleKeys.isNotEmpty()) {
+            roomLists = roomLists - staleKeys
+        }
+        serverConnections.filter { it.isLoggedIn }.forEach { conn ->
+            if (conn.serverId !in roomLists) refreshRoomList(conn.serverId)
         }
     }
-
-    val infiniteTransition = rememberInfiniteTransition()
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(500, easing = EaseInOutCubic),
-            repeatMode = RepeatMode.Reverse
-        )
-    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -210,13 +211,22 @@ fun MainApp(
                                 color = PttTransmitting.copy(alpha = 0.15f),
                                 modifier = Modifier.padding(end = 8.dp)
                             ) {
-                                Text(
-                                    "TX",
+                                Row(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                    fontSize = 11.sp,
-                                    color = PttTransmitting,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        "TX",
+                                        fontSize = 11.sp,
+                                        color = PttTransmitting,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    VoiceWaveformBars(
+                                        isPlaying = true,
+                                        color = PttTransmitting
+                                    )
+                                }
                             }
                         } else if (isReceiving) {
                             Surface(
@@ -224,13 +234,22 @@ fun MainApp(
                                 color = BrandPurple.copy(alpha = 0.15f),
                                 modifier = Modifier.padding(end = 8.dp)
                             ) {
-                                Text(
-                                    "RX",
+                                Row(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                    fontSize = 11.sp,
-                                    color = BrandPurple,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        "RX",
+                                        fontSize = 11.sp,
+                                        color = BrandPurple,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    VoiceWaveformBars(
+                                        isPlaying = true,
+                                        color = BrandPurple
+                                    )
+                                }
                             }
                         }
                     },
@@ -249,7 +268,6 @@ fun MainApp(
                     PttControlBar(
                         isConnected = isConnected,
                         isTransmitting = isTransmitting,
-                        pulseScale = pulseScale,
                         onPress = { talkService.startTransmitting() },
                         onRelease = { talkService.stopTransmitting() }
                     )
@@ -263,24 +281,10 @@ fun MainApp(
                                 selected = selectedTab == index,
                                 onClick = { selectedTab = index },
                                 icon = {
-                                    BadgedBox(
-                                        badge = {
-                                            when (item) {
-                                                is BottomNavItem.Servers -> {
-                                                    val onlineCount = serverConnections.count { it.isOnline }
-                                                    if (onlineCount > 0) {
-                                                        Badge { Text("$onlineCount") }
-                                                    }
-                                                }
-                                                else -> {}
-                                            }
-                                        }
-                                    ) {
-                                        Icon(
-                                            if (selectedTab == index) item.selectedIcon else item.unselectedIcon,
-                                            contentDescription = item.title
-                                        )
-                                    }
+                                    Icon(
+                                        if (selectedTab == index) item.selectedIcon else item.unselectedIcon,
+                                        contentDescription = item.title
+                                    )
                                 },
                                 label = {
                                     Text(item.title, fontSize = 11.sp)
@@ -304,7 +308,35 @@ fun MainApp(
                     .padding(paddingValues)
             ) {
                 when (selectedTab) {
-                    0 -> ServerScreen(
+                    0 -> PttScreen(
+                        activeServer = activeServer,
+                        isTransmitting = isTransmitting,
+                        isReceiving = isReceiving,
+                        messages = textMessages,
+                        onSendMessage = { text ->
+                            scope.launch { talkService.sendTextMessageToActive(text) }
+                        },
+                        onSendLocation = {
+                            scope.launch { talkService.uploadLocationToActive() }
+                        },
+                        onReplayVoice = { clipId ->
+                            talkService.replayVoice(clipId)
+                        },
+                        playingVoiceClipId = playingVoiceClipId
+                    )
+
+                    1 -> ChannelScreen(
+                        serverConnections = serverConnections,
+                        roomLists = roomLists,
+                        onJoinRoom = { serverId, roomId ->
+                            scope.launch { talkService.joinRoom(serverId, roomId) }
+                        },
+                        onRefresh = { serverId ->
+                            refreshRoomList(serverId)
+                        }
+                    )
+
+                    2 -> ServerScreen(
                         serverConnections = serverConnections,
                         savedServers = settings.servers,
                         activeServerId = activeServerId,
@@ -326,39 +358,6 @@ fun MainApp(
                         }
                     )
 
-                    1 -> ChannelScreen(
-                        activeServer = activeServer,
-                        roomList = roomList,
-                        currentRoomId = activeServer?.currentRoomId ?: 0,
-                        onJoinRoom = { roomId ->
-                            if (activeServerId.isNotEmpty()) {
-                                talkService.joinRoom(activeServerId, roomId)
-                            }
-                        },
-                        onRefresh = {
-                            scope.launch {
-                                if (activeServerId.isNotEmpty()) {
-                                    roomList = talkService.loadRoomList(activeServerId)
-                                }
-                            }
-                        }
-                    )
-
-                    2 -> MessageScreen(
-                        messages = textMessages,
-                        activeServer = activeServer,
-                        isConnected = isConnected,
-                        onSendMessage = { text ->
-                            talkService.sendTextMessageToActive(text)
-                        },
-                        onSendLocation = {
-                            scope.launch { talkService.uploadLocationToActive() }
-                        },
-                        onReplayVoice = { clipId ->
-                            talkService.replayVoice(clipId)
-                        }
-                    )
-
                     3 -> SettingsScreen()
                 }
             }
@@ -367,24 +366,53 @@ fun MainApp(
     }
 }
 
+/**
+ * 脉冲缩放动画：仅在 PTT 发射时启动。
+ * 无条件运行的无限动画会让整个 MainApp 每帧重组（60fps 耗电大户），
+ * 放到最小重组作用域并按需创建，空闲时零动画开销。
+ */
+@Composable
+private fun rememberPulseScale(active: Boolean): Float {
+    if (!active) return 1f
+    val transition = rememberInfiniteTransition(label = "pttPulse")
+    val scale by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(500, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pttPulseScale"
+    )
+    return scale
+}
+
 @Composable
 private fun PttControlBar(
     isConnected: Boolean,
     isTransmitting: Boolean,
-    pulseScale: Float,
     onPress: () -> Unit,
     onRelease: () -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
+    val pulseScale = rememberPulseScale(isTransmitting)
+    val density = LocalDensity.current
+    val isImeVisible = WindowInsets.ime.getBottom(density) > 0
+
+    // 软键盘弹起时收缩高度，避免挤占消息视口与输入法
+    val barHeight = if (isImeVisible) 36.dp else 52.dp
+    val verticalPadding = if (isImeVisible) 4.dp else 8.dp
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = verticalPadding),
         contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
+                .height(barHeight)
                 .scale(if (isTransmitting) pulseScale else 1f)
                 .shadow(
                     elevation = if (isConnected) 8.dp else 2.dp,
@@ -408,10 +436,12 @@ private fun PttControlBar(
                                 waitForUpOrCancellation()
                                 continue
                             }
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onPress()
                             try {
                                 waitForUpOrCancellation()
                             } finally {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 onRelease()
                             }
                         }
@@ -426,22 +456,29 @@ private fun PttControlBar(
                 Icon(
                     if (isTransmitting) Icons.Filled.Mic else Icons.Filled.MicOff,
                     contentDescription = "PTT",
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier.size(if (isImeVisible) 18.dp else 22.dp),
                     tint = TextOnPrimary
                 )
                 androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = when {
                         isTransmitting -> "松开停止"
-                        isConnected -> "按住说话"
+                        isConnected -> if (isImeVisible) "按住PTT" else "按住说话"
                         else -> "未连接"
                     },
                     color = TextOnPrimary,
-                    fontSize = 15.sp,
+                    fontSize = if (isImeVisible) 13.sp else 15.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (isTransmitting) {
+                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
+                    VoiceWaveformBars(
+                        isPlaying = true,
+                        color = TextOnPrimary
+                    )
+                }
             }
         }
     }

@@ -8,9 +8,11 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -73,6 +75,10 @@ class TalkService : Service() {
     private lateinit var networkMonitor: NetworkMonitor
     private val pttBroadcastReceivers = mutableListOf<BroadcastReceiver>()
 
+    // 后台保活：防止 CPU 休眠和 Wi-Fi 休眠导致 UDP 心跳中断被服务器踢下线
+    private var keepAliveWakeLock: PowerManager.WakeLock? = null
+    private var keepAliveWifiLock: WifiManager.WifiLock? = null
+
     // 状态暴露
     private val _serverConnections = MutableStateFlow<List<ServerConnection>>(emptyList())
     val serverConnections: StateFlow<List<ServerConnection>> = _serverConnections.asStateFlow()
@@ -87,6 +93,7 @@ class TalkService : Service() {
 
     val transmittingState: StateFlow<Boolean> get() = multiServerManager.transmittingState
     val receivingState: StateFlow<Boolean> get() = multiServerManager.receivingState
+    val playingVoiceClipId: StateFlow<String?> get() = multiServerManager.playingVoiceClipId
 
     val textMessages: StateFlow<List<MessageStore.TextMessage>> get() = messageStore.allMessages
 
@@ -108,6 +115,7 @@ class TalkService : Service() {
 
         setupMessageCallbacks()
         setupServerStateListener()
+        setupSettingsListener()
         setupNetworkMonitor()
         setupPttController()
         setupPttButtonReceiver()
@@ -118,33 +126,107 @@ class TalkService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "Service started")
-        startForeground(NOTIFICATION_ID, createNotification())
-        isRunning = true
-
-        val settings = settingsRepository.loadSettings()
-        if (settings.autoConnect && settings.username.isNotEmpty() && settings.password.isNotEmpty()) {
-            serviceScope.launch {
-                connectToServer(
-                    ServerConfig(
-                        id = "${settings.serverAddress}:${settings.serverPort}",
-                        name = settings.serverAddress,
-                        host = settings.serverAddress,
-                        port = settings.serverPort,
-                        username = settings.username,
-                        password = settings.password,
-                        autoConnect = true
-                    )
-                )
-            }
+        // manifest 声明了 microphone 类型：Android 14+ 上 RECORD_AUDIO 未授权时
+        // startForeground 会抛 SecurityException，这里兜底避免启动闪退
+        try {
+            startForeground(NOTIFICATION_ID, createNotification())
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed, stopping service", e)
+            stopSelf()
+            return START_NOT_STICKY
         }
+        isRunning = true
+        acquireKeepAliveLocks()
+
+        autoConnectAllServers()
 
         return START_STICKY
+    }
+
+    /**
+     * 同时自动连接所有已保存的服务器；
+     * 列表为空时回退到默认设置中的服务器
+     */
+    private fun autoConnectAllServers() {
+        val settings = settingsRepository.loadSettings()
+        if (settings.username.isEmpty() || settings.password.isEmpty()) return
+
+        val serversToConnect = if (settings.servers.isNotEmpty()) {
+            settings.servers
+        } else {
+            listOf(
+                ServerConfig(
+                    id = "${settings.serverAddress}:${settings.serverPort}",
+                    name = settings.serverAddress,
+                    host = settings.serverAddress,
+                    port = settings.serverPort,
+                    username = settings.username,
+                    password = settings.password,
+                    autoConnect = true
+                )
+            )
+        }
+
+        serversToConnect.forEach { config ->
+            val alreadyOnline = _serverConnections.value.any {
+                it.serverId == config.id && it.isOnline
+            }
+            if (alreadyOnline) {
+                Log.d(TAG, "Auto-connect skipped, ${config.id} already online")
+            } else {
+                serviceScope.launch { connectToServer(config) }
+            }
+        }
+    }
+
+    /**
+     * 获取常驻保活锁（服务生命周期内持有）：
+     * - PARTIAL_WAKE_LOCK：熄屏后 CPU 继续运行，心跳定时器不被推迟
+     * - WifiLock HIGH_PERF：Wi-Fi 不进入省电休眠，UDP 链路保持畅通
+     */
+    private fun acquireKeepAliveLocks() {
+        if (keepAliveWakeLock?.isHeld == true) return
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        keepAliveWakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "78HAM:KeepAliveWakeLock"
+        ).apply {
+            setReferenceCounted(false)
+            try { acquire() } catch (e: Exception) { Log.e(TAG, "acquireWakeLock failed", e) }
+        }
+
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            @Suppress("DEPRECATION")
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        keepAliveWifiLock = wifiManager.createWifiLock(
+            wifiMode,
+            "78HAM:KeepAliveWifiLock"
+        ).apply {
+            setReferenceCounted(false)
+            try { acquire() } catch (e: Exception) { Log.e(TAG, "acquireWifiLock failed", e) }
+        }
+
+        Log.d(TAG, "Keep-alive locks acquired")
+    }
+
+    private fun releaseKeepAliveLocks() {
+        try { keepAliveWakeLock?.release() } catch (_: Exception) {}
+        try { keepAliveWifiLock?.release() } catch (_: Exception) {}
+        keepAliveWakeLock = null
+        keepAliveWifiLock = null
+        Log.d(TAG, "Keep-alive locks released")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
 
+        releaseKeepAliveLocks()
         multiServerManager.release()
         pttController.release()
         networkMonitor.stop()
@@ -157,8 +239,10 @@ class TalkService : Service() {
         pttBroadcastReceivers.clear()
 
         try {
+            @Suppress("DEPRECATION")
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
             val componentName = android.content.ComponentName(this, PttButtonReceiver::class.java)
+            @Suppress("DEPRECATION")
             audioManager.unregisterMediaButtonEventReceiver(componentName)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to unregister media button receiver", e)
@@ -182,7 +266,7 @@ class TalkService : Service() {
 
     // ============== 频道操作 ==============
 
-    fun joinRoom(serverId: String, roomId: Int) =
+    suspend fun joinRoom(serverId: String, roomId: Int) =
         multiServerManager.joinRoom(serverId, roomId)
 
     suspend fun loadRoomList(serverId: String): List<ApiClient.RoomInfo> =
@@ -204,7 +288,11 @@ class TalkService : Service() {
             Log.w(TAG, "replayVoice: clip not found or expired, id=$clipId")
             return
         }
-        multiServerManager.replayVoiceClip(pcm)
+        multiServerManager.replayVoiceClip(pcm, clipId)
+    }
+
+    fun stopReplayVoice() {
+        multiServerManager.stopVoiceClip()
     }
 
     fun handleKeyEvent(event: android.view.KeyEvent): Boolean =
@@ -212,7 +300,7 @@ class TalkService : Service() {
 
     // ============== 文本消息 ==============
 
-    fun sendTextMessage(serverId: String, text: String) {
+    suspend fun sendTextMessage(serverId: String, text: String) {
         val connection = multiServerManager.getConnection(serverId) ?: run {
             Log.e(TAG, "sendTextMessage: no connection for serverId=$serverId")
             return
@@ -236,29 +324,13 @@ class TalkService : Service() {
         val sent = multiServerManager.sendTextMessage(serverId, userInfo.callsign, text, ssid, dmrId)
 
         if (sent) {
-            val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
-            val timestamp = formatTimestamp()
-
-            messageStore.addMessage(
-                MessageStore.TextMessage(
-                    id = UUID.randomUUID().toString(),
-                    serverId = serverId,
-                    serverName = serverName,
-                    callsign = userInfo.callsign,
-                    ssid = ssid,
-                    content = text,
-                    timestamp = timestamp,
-                    timestampMs = System.currentTimeMillis(),
-                    isSelf = true,
-                    type = MessageStore.MessageType.TEXT
-                )
-            )
+            addOwnMessage(serverId, userInfo.callsign, ssid, text, MessageStore.MessageType.TEXT)
         } else {
             Log.e(TAG, "sendTextMessage: failed to send message for serverId=$serverId")
         }
     }
 
-    fun sendTextMessageToActive(text: String) {
+    suspend fun sendTextMessageToActive(text: String) {
         val activeId = multiServerManager.activeServerId.value
         if (activeId.isNotEmpty()) {
             sendTextMessage(activeId, text)
@@ -273,44 +345,29 @@ class TalkService : Service() {
             return false
         }
 
-        val locationResult = locationManager.getCurrentLocation()
-        return locationResult.fold(
-            onSuccess = { (lat, lng) ->
-                val connection = multiServerManager.getConnection(serverId) ?: return false
-                val userInfo = connection.userInfo ?: return false
-                val deviceData = connection.deviceData
+        val location = locationManager.getCurrentLocation().getOrElse { error ->
+            showToast("获取位置失败: ${error.message}")
+            return false
+        }
+        val (lat, lng) = location
 
-                val ssid = deviceData?.ssid ?: DEFAULT_SSID
-                val dmrId = deviceData?.dmrId ?: userInfo.dmrId
+        val connection = multiServerManager.getConnection(serverId) ?: return false
+        val userInfo = connection.userInfo ?: return false
+        val deviceData = connection.deviceData
 
-                multiServerManager.sendLocation(serverId, userInfo.callsign, lat, lng, ssid, dmrId)
+        val ssid = deviceData?.ssid ?: DEFAULT_SSID
+        val dmrId = deviceData?.dmrId ?: userInfo.dmrId
 
-                val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
-                val timestamp = formatTimestamp()
+        multiServerManager.sendLocation(serverId, userInfo.callsign, lat, lng, ssid, dmrId)
 
-                messageStore.addMessage(
-                    MessageStore.TextMessage(
-                        id = UUID.randomUUID().toString(),
-                        serverId = serverId,
-                        serverName = serverName,
-                        callsign = userInfo.callsign,
-                        ssid = ssid,
-                        content = "📍 已上传位置: ${"%.4f".format(lat)}, ${"%.4f".format(lng)}",
-                        timestamp = timestamp,
-                        timestampMs = System.currentTimeMillis(),
-                        isSelf = true,
-                        type = MessageStore.MessageType.LOCATION
-                    )
-                )
-
-                showToast("位置已上传")
-                true
-            },
-            onFailure = { error ->
-                showToast("获取位置失败: ${error.message}")
-                false
-            }
+        addOwnMessage(
+            serverId, userInfo.callsign, ssid,
+            "📍 已上传位置: ${"%.4f".format(lat)}, ${"%.4f".format(lng)}",
+            MessageStore.MessageType.LOCATION
         )
+
+        showToast("位置已上传")
+        return true
     }
 
     suspend fun uploadLocationToActive(): Boolean {
@@ -385,6 +442,29 @@ class TalkService : Service() {
 
             serviceScope.launch {
                 _receivedMessages.emit(VoiceMessage(callsign, ssid, content, timestamp, 1))
+            }
+        }
+    }
+
+    private fun setupSettingsListener() {
+        serviceScope.launch {
+            // StateFlow 首值立即发出 → 服务启动时应用当前编码与音频/PTT参数；
+            // 设置页保存后（共享 flow）自动热切换所有连接的编码与音量/增益/按键设置
+            settingsRepository.settings.collect { settings ->
+                multiServerManager.setAudioCodec(settings.codec)
+                multiServerManager.setAudioVolume(settings.volume)
+                multiServerManager.setAudioGain(settings.gain)
+
+                if (::pttController.isInitialized) {
+                    val deviceProfile = DeviceKeyProfiles.detect()
+                    val effectivePttKey = if (settings.pttKeyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
+                        deviceProfile.pttKeyCode
+                    } else {
+                        settings.pttKeyCode
+                    }
+                    pttController.setPttKeyCode(effectivePttKey)
+                    pttController.setScreenOffPtt(settings.screenOffPtt)
+                }
             }
         }
     }
@@ -470,7 +550,11 @@ class TalkService : Service() {
                             }
                         }
                     }
-                    registerReceiver(receiver, filter)
+                    // Android 14+ 注册非系统广播必须显式指定 export 标志，否则抛 SecurityException
+                    androidx.core.content.ContextCompat.registerReceiver(
+                        this, receiver, filter,
+                        androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+                    )
                     pttBroadcastReceivers.add(receiver)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to register broadcast: $action", e)
@@ -489,8 +573,10 @@ class TalkService : Service() {
         }
 
         try {
+            @Suppress("DEPRECATION")
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
             val componentName = android.content.ComponentName(this, PttButtonReceiver::class.java)
+            @Suppress("DEPRECATION")
             audioManager.registerMediaButtonEventReceiver(componentName)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register media button receiver", e)
@@ -555,7 +641,34 @@ class TalkService : Service() {
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
-    private fun formatTimestamp(): String = timestampFormat.format(Date())
+    private fun formatTimestamp(): String = synchronized(timestampFormat) {
+        timestampFormat.format(Date())
+    }
+
+    /** 统一构造本台发出的消息（文本/位置），消除重复的 Message 构建代码 */
+    private fun addOwnMessage(
+        serverId: String,
+        callsign: String,
+        ssid: Int,
+        content: String,
+        type: MessageStore.MessageType
+    ) {
+        val serverName = _serverConnections.value.find { it.serverId == serverId }?.name ?: serverId
+        messageStore.addMessage(
+            MessageStore.TextMessage(
+                id = UUID.randomUUID().toString(),
+                serverId = serverId,
+                serverName = serverName,
+                callsign = callsign,
+                ssid = ssid,
+                content = content,
+                timestamp = formatTimestamp(),
+                timestampMs = System.currentTimeMillis(),
+                isSelf = true,
+                type = type
+            )
+        )
+    }
 
     private suspend fun showToast(message: String) {
         withContext(Dispatchers.Main) {

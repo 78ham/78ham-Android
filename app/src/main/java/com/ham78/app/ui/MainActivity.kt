@@ -48,7 +48,7 @@ class MainActivity : ComponentActivity() {
         }
 
         Intent(this, TalkService::class.java).also { intent ->
-            startService(intent)
+            androidx.core.content.ContextCompat.startForegroundService(this, intent)
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         }
     }

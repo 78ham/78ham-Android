@@ -149,7 +149,7 @@ object Nrl21Protocol {
     }
 
     /**
-     * 通用包创建方法
+     * 通用包创建方法（零额外包装对象，直接构建原生字节数组）
      */
     fun createPacket(
         type: Int,
@@ -160,57 +160,78 @@ object Nrl21Protocol {
         data: ByteArray? = null
     ): ByteArray {
         val dataSize = data?.size ?: 0
-        val buffer = ByteBuffer.allocate(PACKET_SIZE + dataSize)
-        buffer.order(ByteOrder.BIG_ENDIAN)
+        val totalLength = FIXED_BUFFER_SIZE + dataSize
+        val packet = ByteArray(totalLength)
 
         // 写入固定头部 "NRL2"
-        writeString(buffer, OFF_HEADER, HEADER, HEADER_LEN)
-        // 长度 (头部 + 数据总长度，与服务端 encodeNRL21 一致)
-        buffer.putShort(OFF_LENGTH, (FIXED_BUFFER_SIZE + dataSize).toShort())
-        // DMR ID (3字节)
-        writeUint24(buffer, OFF_DMR_ID, dmrId)
-        // 密码字段 (9-19 共11字节，ByteBuffer.allocate 已初始化为0)
+        packet[0] = 'N'.code.toByte()
+        packet[1] = 'R'.code.toByte()
+        packet[2] = 'L'.code.toByte()
+        packet[3] = '2'.code.toByte()
 
-        // type
-        buffer.put(OFF_TYPE, type.toByte())
-        // status
-        buffer.put(OFF_STATUS, 1)
-        // count
-        buffer.putShort(OFF_COUNT, 0)
+        // 长度 (大端 16bit)
+        packet[OFF_LENGTH] = ((totalLength shr 8) and 0xFF).toByte()
+        packet[OFF_LENGTH + 1] = (totalLength and 0xFF).toByte()
+
+        // DMR ID (大端 24bit)
+        packet[OFF_DMR_ID] = ((dmrId shr 16) and 0xFF).toByte()
+        packet[OFF_DMR_ID + 1] = ((dmrId shr 8) and 0xFF).toByte()
+        packet[OFF_DMR_ID + 2] = (dmrId and 0xFF).toByte()
+
+        // type / status / count
+        packet[OFF_TYPE] = type.toByte()
+        packet[OFF_STATUS] = 1
+        packet[OFF_COUNT] = 0
+        packet[OFF_COUNT + 1] = 0
 
         // callSign (6字节)
-        writeString(buffer, OFF_CALLSIGN, callSign, CALLSIGN_LEN)
-        // ssid
-        buffer.put(OFF_SSID, ssid.toByte())
-        // devModel
-        buffer.put(OFF_DEVMODEL, devModel.toByte())
-
-        // 数据部分，从 FIXED_BUFFER_SIZE (48) 开始写入，避免覆盖头部
-        if (data != null) {
-            System.arraycopy(data, 0, buffer.array(), FIXED_BUFFER_SIZE, data.size)
+        val csLen = minOf(callSign.length, CALLSIGN_LEN)
+        for (i in 0 until csLen) {
+            packet[OFF_CALLSIGN + i] = callSign[i].code.toByte()
         }
 
-        return buffer.array()
+        // ssid / devModel
+        packet[OFF_SSID] = ssid.toByte()
+        packet[OFF_DEVMODEL] = devModel.toByte()
+
+        // 数据载荷
+        if (data != null && dataSize > 0) {
+            System.arraycopy(data, 0, packet, FIXED_BUFFER_SIZE, dataSize)
+        }
+
+        return packet
     }
 
     /**
-     * 解析接收到的数据包
+     * 解析接收到的数据包（极速无锁解析，无 ByteBuffer/StringBuilder 中间分配）
      */
     fun decodePacket(data: ByteArray): Packet? {
         if (data.size < FIXED_BUFFER_SIZE) {
             return null
         }
 
-        val buffer = ByteBuffer.wrap(data)
-        buffer.order(ByteOrder.BIG_ENDIAN)
-
-        val header = readString(buffer, OFF_HEADER, HEADER_LEN)
-        if (header != HEADER) {
+        // 快速校验头部 "NRL2"
+        if (data[0] != 'N'.code.toByte() ||
+            data[1] != 'R'.code.toByte() ||
+            data[2] != 'L'.code.toByte() ||
+            data[3] != '2'.code.toByte()) {
             return null
         }
 
-        val callSign = readString(buffer, OFF_CALLSIGN, CALLSIGN_LEN).trim()
-        val dmrId = readUint24(buffer, OFF_DMR_ID)
+        // DMR ID (24bit 大端)
+        val dmrId = ((data[OFF_DMR_ID].toInt() and 0xFF) shl 16) or
+                    ((data[OFF_DMR_ID + 1].toInt() and 0xFF) shl 8) or
+                    (data[OFF_DMR_ID + 2].toInt() and 0xFF)
+
+        // 呼号解析（直接提取有效 ASCII 字符，避免每次接收分配 StringBuilder）
+        var csLen = 0
+        while (csLen < CALLSIGN_LEN && data[OFF_CALLSIGN + csLen] != 0.toByte()) {
+            csLen++
+        }
+        val callSign = if (csLen > 0) {
+            String(data, OFF_CALLSIGN, csLen, Charsets.US_ASCII).trim()
+        } else ""
+
         val type = data[OFF_TYPE].toInt() and 0xFF
         val ssid = data[OFF_SSID].toInt() and 0xFF
         val devModel = data[OFF_DEVMODEL].toInt() and 0xFF
@@ -218,7 +239,10 @@ object Nrl21Protocol {
         val count = ((data[OFF_COUNT].toInt() and 0xFF) shl 8) or (data[OFF_COUNT + 1].toInt() and 0xFF)
 
         val payloadData = if (data.size > FIXED_BUFFER_SIZE) {
-            data.sliceArray(FIXED_BUFFER_SIZE until data.size)
+            val pSize = data.size - FIXED_BUFFER_SIZE
+            val out = ByteArray(pSize)
+            System.arraycopy(data, FIXED_BUFFER_SIZE, out, 0, pSize)
+            out
         } else {
             ByteArray(0)
         }
@@ -236,17 +260,20 @@ object Nrl21Protocol {
     }
 
     /**
-     * 解析并返回包类型
+     * 解析并返回包类型（直接读取偏移，无需全包解析）
      */
     fun getPacketType(data: ByteArray): Int? {
-        return decodePacket(data)?.type
+        if (data.size < FIXED_BUFFER_SIZE) return null
+        return data[OFF_TYPE].toInt() and 0xFF
     }
 
     /**
-     * 判断是否为语音包
+     * 判断是否为语音包（直接读取偏移，无对象分配）
      */
     fun isVoicePacket(data: ByteArray): Boolean {
-        return getPacketType(data) == TYPE_VOICE
+        if (data.size < FIXED_BUFFER_SIZE) return false
+        val type = data[OFF_TYPE].toInt() and 0xFF
+        return type == TYPE_VOICE || type == TYPE_OPUS
     }
 
     /**

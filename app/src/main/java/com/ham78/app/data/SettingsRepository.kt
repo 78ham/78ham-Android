@@ -33,8 +33,19 @@ class SettingsRepository(context: Context) {
         )
     }
 
-    private val _settings = MutableStateFlow(loadSettings())
-    val settings: StateFlow<UserSettings> = _settings.asStateFlow()
+    init {
+        // 首个实例创建时加载一次；后续实例共享同一份 flow，
+        // 保证任意实例 saveSettings 后所有观察者（UI/Service）都能收到更新
+        synchronized(SettingsRepository::class.java) {
+            if (!globalFlowInitialized) {
+                _sharedSettings.value = loadSettings()
+                globalFlowInitialized = true
+            }
+        }
+    }
+
+    private val _settings get() = _sharedSettings
+    val settings: StateFlow<UserSettings> = _sharedSettings.asStateFlow()
 
     fun loadSettings(): UserSettings {
         val stored = prefs
@@ -143,5 +154,10 @@ class SettingsRepository(context: Context) {
         private const val KEY_PTT_KEY = "ptt_key"
         private const val KEY_AUTO_CONNECT = "auto_connect"
         private const val KEY_SERVERS = "servers"
+
+        // 所有 SettingsRepository 实例共享的设置流
+        private val _sharedSettings = MutableStateFlow(UserSettings.DEFAULT)
+        @Volatile
+        private var globalFlowInitialized = false
     }
 }

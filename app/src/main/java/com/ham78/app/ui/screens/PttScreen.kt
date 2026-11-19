@@ -378,3 +378,336 @@ private fun StatusBadge(label: String, color: Color, showWave: Boolean = false) 
     }
 }
 
+
+@Composable
+fun MessageBubble(
+    message: MessageStore.TextMessage,
+    onReplayVoice: (String) -> Unit = {},
+    playingVoiceClipId: String? = null
+) {
+    val isPlayableVoice = message.type == MessageStore.MessageType.VOICE &&
+        message.voiceClipId.isNotEmpty()
+    val isPlayingThisVoice = isPlayableVoice &&
+        playingVoiceClipId != null &&
+        playingVoiceClipId == message.voiceClipId
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        horizontalArrangement = if (message.isSelf) Arrangement.End else Arrangement.Start
+    ) {
+        if (!message.isSelf) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when (message.type) {
+                            MessageStore.MessageType.VOICE -> BrandPink.copy(alpha = 0.3f)
+                            MessageStore.MessageType.LOCATION -> BrandCyan.copy(alpha = 0.3f)
+                            else -> BrandPurple.copy(alpha = 0.3f)
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = message.callsign.firstOrNull()?.toString() ?: "?",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+
+        Column(
+            modifier = Modifier
+                .widthIn(max = if (message.type == MessageStore.MessageType.LOCATION) 300.dp else 280.dp)
+                .clip(
+                    RoundedCornerShape(
+                        topStart = if (message.isSelf) 14.dp else 4.dp,
+                        topEnd = if (message.isSelf) 4.dp else 14.dp,
+                        bottomStart = 14.dp,
+                        bottomEnd = 14.dp
+                    )
+                )
+                .background(
+                    if (message.isSelf) BrandPurple.copy(alpha = 0.85f)
+                    else SurfaceCard
+                )
+                .then(
+                    if (isPlayableVoice) Modifier.clickable { onReplayVoice(message.voiceClipId) }
+                    else Modifier
+                )
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+        ) {
+            if (!message.isSelf) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "${message.callsign}-${message.ssid}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BrandPurple
+                    )
+                    if (message.serverName.isNotEmpty()) {
+                        Text(
+                            text = message.serverName,
+                            fontSize = 10.sp,
+                            color = TextSecondary.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+            }
+
+            when (message.type) {
+                MessageStore.MessageType.VOICE -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (isPlayingThisVoice) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (isPlayingThisVoice) "暂停" else "回放语音",
+                            tint = if (message.isSelf) TextOnPrimary else BrandPurple,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = message.content,
+                            color = if (message.isSelf) TextOnPrimary else TextPrimary,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        VoiceWaveformBars(
+                            isPlaying = isPlayingThisVoice,
+                            color = if (message.isSelf) TextOnPrimary else BrandPurple
+                        )
+                    }
+                }
+                MessageStore.MessageType.LOCATION -> {
+                    LocationBubbleContent(
+                        content = message.content,
+                        isSelf = message.isSelf
+                    )
+                }
+                else -> {
+                    Text(
+                        text = message.content,
+                        color = if (message.isSelf) TextOnPrimary else TextPrimary,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+
+            Text(
+                text = message.timestamp,
+                fontSize = 10.sp,
+                color = if (message.isSelf) TextOnPrimary.copy(alpha = 0.6f) else TextSecondary.copy(alpha = 0.6f),
+                modifier = Modifier.align(Alignment.End)
+            )
+        }
+    }
+}
+
+/**
+ * 语音跳动声波波形小组件
+ */
+@Composable
+fun VoiceWaveformBars(
+    isPlaying: Boolean,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "voiceWave")
+    val h1 by transition.animateFloat(
+        initialValue = 4f,
+        targetValue = 14f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(280, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "h1"
+    )
+    val h2 by transition.animateFloat(
+        initialValue = 12f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(340, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "h2"
+    )
+    val h3 by transition.animateFloat(
+        initialValue = 6f,
+        targetValue = 16f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(240, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "h3"
+    )
+
+    Row(
+        modifier = modifier.height(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val bars = if (isPlaying) listOf(h1, h2, h3) else listOf(5f, 9f, 6f)
+        bars.forEach { h ->
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(h.dp)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(color.copy(alpha = if (isPlaying) 0.9f else 0.4f))
+            )
+        }
+    }
+}
+
+/**
+ * 位置卡片气泡内容：坐标高亮展示 + 快速复制 + 唤起外部地图
+ */
+@Composable
+fun LocationBubbleContent(
+    content: String,
+    isSelf: Boolean
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    // 正则提取浮点数经纬度
+    val regex = Regex("(-?\\d+(?:\\.\\d+)?)[,\\s，]+(-?\\d+(?:\\.\\d+)?)")
+    val match = regex.find(content)
+    val lat = match?.groupValues?.getOrNull(1)
+    val lng = match?.groupValues?.getOrNull(2)
+
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                Icons.Filled.LocationOn,
+                contentDescription = null,
+                tint = if (isSelf) TextOnPrimary else BrandCyan,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = "位置分享",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isSelf) TextOnPrimary else BrandCyan
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (isSelf) Color.Black.copy(alpha = 0.15f) else Color.Black.copy(alpha = 0.25f),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                if (lat != null && lng != null) {
+                    Text(
+                        text = "纬度: $lat",
+                        fontSize = 12.sp,
+                        color = if (isSelf) TextOnPrimary else TextPrimary,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "经度: $lng",
+                        fontSize = 12.sp,
+                        color = if (isSelf) TextOnPrimary else TextPrimary,
+                        fontWeight = FontWeight.Medium
+                    )
+                } else {
+                    Text(
+                        text = content,
+                        fontSize = 13.sp,
+                        color = if (isSelf) TextOnPrimary else TextPrimary
+                    )
+                }
+            }
+        }
+
+        if (lat != null && lng != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 复制坐标
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = (if (isSelf) TextOnPrimary else BrandPurple).copy(alpha = 0.15f),
+                    modifier = Modifier.clickable {
+                        clipboardManager.setText(AnnotatedString("$lat, $lng"))
+                        Toast.makeText(context, "坐标已复制: $lat, $lng", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.ContentCopy,
+                            contentDescription = "复制",
+                            tint = if (isSelf) TextOnPrimary else BrandPurple,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "复制",
+                            fontSize = 11.sp,
+                            color = if (isSelf) TextOnPrimary else BrandPurple,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // 打开外部地图
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = (if (isSelf) TextOnPrimary else BrandCyan).copy(alpha = 0.15f),
+                    modifier = Modifier.clickable {
+                        try {
+                            val uri = Uri.parse("geo:$lat,$lng?q=$lat,$lng(业余电台位置)")
+                            val mapIntent = Intent(Intent.ACTION_VIEW, uri)
+                            context.startActivity(mapIntent)
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "未找到可用地图应用", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Map,
+                            contentDescription = "地图",
+                            tint = if (isSelf) TextOnPrimary else BrandCyan,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "导航",
+                            fontSize = 11.sp,
+                            color = if (isSelf) TextOnPrimary else BrandCyan,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

@@ -19,7 +19,9 @@ class BootReceiver : BroadcastReceiver() {
         Log.d(TAG, "Boot completed, checking auto start settings")
 
         val settings = SettingsRepository(context).loadSettings()
-        if (settings.autoConnect && settings.dmrId != 0) {
+        // 用"有没有账号"判断是否自启；原来的 dmrId != 0 判断有漏洞：
+        // dmrId 只在登录成功后写入，跳过登录直接进主界面的用户永远无法开机自启
+        if (settings.autoConnect && settings.username.isNotEmpty()) {
             Log.d(TAG, "Auto starting TalkService")
             val serviceIntent = Intent(context, TalkService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

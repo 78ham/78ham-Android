@@ -81,6 +81,11 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     private val _serverConnections = MutableStateFlow<List<ServerConnection>>(emptyList())
     val serverConnections: StateFlow<List<ServerConnection>> = _serverConnections.asStateFlow()
 
+    // 收听中的房间：serverId → 房间 ID。收听=只收不播，与"当前房间"（可发可收）并存；
+    // 所有已收听房间的语音都会解码播放和计入消息流，不只限当前选中服务器
+    private val _listenRooms = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val listenRooms: StateFlow<Map<String, Int>> = _listenRooms.asStateFlow()
+
     private val _activeServerId = MutableStateFlow("")
     val activeServerId: StateFlow<String> = _activeServerId.asStateFlow()
 
@@ -151,6 +156,7 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
 
                 var deviceData: ApiClient.DeviceData? = null
                 try {
+                    // 先用默认 SSID 查一次设备；查到后以设备真实 SSID 为准
                     val deviceResult = ApiClient.getDevice(config.host, userInfo.callsign, 179)
                     deviceResult.getOrNull()?.let { device ->
                         resources.deviceData = device
@@ -187,34 +193,14 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                     }
                     startRefreshData(serverId, resources, config.host, userInfo)
 
-                    // 记住上次的房间（全局唯一）：连接成功后重新加入服务器端记录的 group_id；
-                    // 若其他服务器已占用房间，则清掉本台的记录，保证同一时间只有一个房间
+                    // 记住上次的房间（按服务器记忆）：连接成功后重新加入服务器端记录的 group_id。
+                    // 多房间模式下各服务器独立记忆自己的房间，互不干扰
                     val lastRoomId = if (device != null && device.groupId != 0) device.groupId
                         else resources.deviceData?.groupId ?: 0
                     if (lastRoomId > 0) {
-                        val roomOccupied = connectionStates.values.any { it.currentRoomId > 0 }
-                        if (roomOccupied) {
-                            updateState(serverId) { it.copy(currentRoomId = 0, currentGroupName = "") }
-                            withContext(Dispatchers.IO) {
-                                udpClient.sendJoinRoom(0)
-                                try {
-                                    val dev = resources.deviceData
-                                    val host = config.host
-                                    if (dev != null && dev.id > 0) {
-                                        ApiClient.updateDevice(host, dev, 0).getOrNull()?.let {
-                                            resources.deviceData = dev.copy(groupId = 0)
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Clear stale room failed: ${e.message}")
-                                }
-                            }
-                            Log.d(TAG, "Room $lastRoomId on $serverId cleared (room occupied elsewhere)")
-                        } else {
-                            updateState(serverId) { it.copy(currentRoomId = lastRoomId) }
-                            withContext(Dispatchers.IO) { udpClient.sendJoinRoom(lastRoomId) }
-                            Log.d(TAG, "Rejoined last room $lastRoomId on $serverId")
-                        }
+                        updateState(serverId) { it.copy(currentRoomId = lastRoomId) }
+                        withContext(Dispatchers.IO) { udpClient.sendJoinRoom(lastRoomId) }
+                        Log.d(TAG, "Rejoined last room $lastRoomId on $serverId")
                     }
 
                     emitState()
@@ -259,6 +245,7 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         }
         connections.remove(serverId)
         connectionStates.remove(serverId)
+        _listenRooms.value = _listenRooms.value - serverId   // 断开的服务器不再有收听记录
 
         if (_activeServerId.value == serverId) {
             _activeServerId.value = connections.keys.firstOrNull() ?: ""
@@ -316,6 +303,18 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         connections[activeId]?.udpClient?.sendAudioData(audioData, isOpus)
     }
 
+    /**
+     * 把一段已生成的 PCM 信号（CW/DTMF/SSTV/尾音/TTS/录音）经活跃连接发送。
+     * 返回 false = 没有活跃连接、未进房间或正在 PTT 发射。
+     */
+    fun transmitPcmToActive(pcm: ByteArray): Boolean {
+        val activeId = _activeServerId.value
+        if (activeId.isEmpty()) return false
+        val resources = connections[activeId] ?: return false
+        if (connectionStates[activeId]?.currentRoomId == 0) return false   // 不在房间里无处可发
+        return resources.audioManager.transmitPcm(pcm)
+    }
+
     fun replayVoiceClip(pcm: ByteArray, clipId: String = "") {
         getActiveConnection()?.audioManager?.playClip(pcm, clipId)
     }
@@ -356,12 +355,13 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     }
 
     /**
-     * 加入房间（全局唯一房间策略）：
-     * 无论连着多少台服务器，同一时间只能加入一个房间。
-     * 选中某台服务器的房间后，自动把该服务器切换为选中服务器，
-     * 并退出其他服务器上已加入的房间。
+     * 加入房间：发送端（可发可收）。
+     * 多房间模式：允许同时收听多个房间，但"当前房间"每台服务器只有一个；
+     * 加入新房间只替换本服务器的当前房间，不再清空其他服务器的房间。
+     *
+     * @param asListen true = 只收听模式（纯接收，不作为发送目标）
      */
-    suspend fun joinRoom(serverId: String, roomId: Int) {
+    suspend fun joinRoom(serverId: String, roomId: Int, asListen: Boolean = false) {
         val resources = connections[serverId] ?: run {
             Log.e(TAG, "joinRoom: no connection for serverId=$serverId")
             return
@@ -372,67 +372,48 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
             return
         }
 
-        // 切换选中服务器到目标服务器
-        if (_activeServerId.value != serverId) {
-            switchActiveServer(serverId)
+        if (asListen) {
+            // --- 收听模式：加入另一个服务器的房间，不动"当前房间" ---
+            _listenRooms.value = _listenRooms.value + (serverId to roomId)
+        } else {
+            // --- 正式加入：本服务器切为活跃（发送目标跟随当前房间）---
+            if (_activeServerId.value != serverId) {
+                switchActiveServer(serverId)
+            }
+            _listenRooms.value = _listenRooms.value - serverId   // 本服务器的纯收听记录被正式加入取代
         }
-
-        // 退出其他服务器上已加入的房间，保证全局只有一个房间
-        connectionStates.entries
-            .filter { it.key != serverId && it.value.currentRoomId > 0 }
-            .toList()
-            .forEach { leaveRoom(it.key) }
 
         withContext(Dispatchers.IO) {
             udp.sendJoinRoom(roomId)
 
             // 同步更新服务器端设备分组，避免 5 秒后的定时刷新把 currentRoomId 拉回旧频道
-            val device = resources.deviceData
-            val host = connectionStates[serverId]?.serverHost.orEmpty()
-            if (device != null && device.id > 0 && host.isNotEmpty() && device.groupId != roomId) {
-                try {
-                    ApiClient.updateDevice(host, device, roomId).getOrNull()?.let {
-                        resources.deviceData = device.copy(groupId = roomId)
+            // （只对正式加入做：收听不写服务器端分组，避免覆盖本台设备在服务器上的归属）
+            if (!asListen) {
+                val device = resources.deviceData
+                val host = connectionStates[serverId]?.serverHost.orEmpty()
+                if (device != null && device.id > 0 && host.isNotEmpty() && device.groupId != roomId) {
+                    try {
+                        ApiClient.updateDevice(host, device, roomId).getOrNull()?.let {
+                            resources.deviceData = device.copy(groupId = roomId)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "joinRoom: updateDevice failed: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "joinRoom: updateDevice failed: ${e.message}")
                 }
             }
         }
 
-        updateState(serverId) { it.copy(currentRoomId = roomId) }
+        if (!asListen) {
+            updateState(serverId) { it.copy(currentRoomId = roomId) }
+        }
         emitState()
-        Log.d(TAG, "joinRoom: serverId=$serverId roomId=$roomId")
+        Log.d(TAG, "joinRoom: serverId=$serverId roomId=$roomId listen=$asListen")
     }
 
-    /**
-     * 退出某台服务器上已加入的房间：
-     * UDP 侧发送房间号 0，同时把服务器端设备分组清零，
-     * 避免 5 秒定时刷新又把 currentRoomId 拉回旧频道。
-     */
-    private suspend fun leaveRoom(serverId: String) {
-        val resources = connections[serverId] ?: return
-
-        withContext(Dispatchers.IO) {
-            if (resources.udpClient.isConnected()) {
-                resources.udpClient.sendJoinRoom(0)
-            }
-            val device = resources.deviceData
-            val host = connectionStates[serverId]?.serverHost.orEmpty()
-            if (device != null && device.id > 0 && host.isNotEmpty()) {
-                try {
-                    if (ApiClient.updateDevice(host, device, 0).getOrNull() == true) {
-                        resources.deviceData = device.copy(groupId = 0)
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "leaveRoom: updateDevice failed: ${e.message}")
-                }
-            }
-        }
-
-        updateState(serverId) { it.copy(currentRoomId = 0, currentGroupName = "") }
-        emitState()
-        Log.d(TAG, "leaveRoom: serverId=$serverId")
+    /** 停止收听某台服务器的房间（正式加入的房间不受影响） */
+    fun stopListening(serverId: String) {
+        _listenRooms.value = _listenRooms.value - serverId
+        Log.d(TAG, "stopListening: serverId=$serverId")
     }
 
     suspend fun loadRoomList(serverId: String): List<ApiClient.RoomInfo> {
@@ -516,14 +497,20 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
             override fun onPacketReceived(packet: Nrl21Protocol.Packet) {
                 when (packet.type) {
                     Nrl21Protocol.TYPE_VOICE, Nrl21Protocol.TYPE_OPUS -> {
-                        // 只播放当前选中（活跃）服务器的语音
-                        if (serverId == _activeServerId.value) {
-                            resources.audioManager.handleReceivedAudio(packet.data, packet.type, packet.callSign)
-                        }
-
-                        // 解码在锁外执行：Opus 解码较重，避免阻塞 flush 检查与会话拼接
+                        // 每个语音包只解码一次：解码结果同时用于播放和会话缓存，
+                        // 原来活跃服务器每个包解两次（Opus 解码较重，白费一半 CPU）
                         val pcm = resources.audioManager.decodeToPcm(packet.data, packet.type)
 
+                        // 多房间收听：每个连接只播放自己收听/所在的房间的语音，
+                        // 不再要求"必须是当前选中服务器"（原单房间策略的限制）
+                        val listeningThisServer =
+                            serverId == _activeServerId.value ||
+                            _listenRooms.value[serverId] != null
+                        if (listeningThisServer) {
+                            resources.audioManager.handleReceivedPcm(pcm, packet.callSign)
+                        }
+
+                        // 解码已在锁外执行：Opus 解码较重，避免阻塞 flush 检查与会话拼接
                         synchronized(voiceLock) {
                             if (sessionCallsign.isNotEmpty() &&
                                 (packet.callSign != sessionCallsign || packet.ssid != sessionSsid)) {

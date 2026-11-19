@@ -373,7 +373,11 @@ fun LoginScreen(
             Spacer(modifier = Modifier.weight(1f))
 
             Text(
-                text = "版本 2.0.0 · SSID 默认 179",
+                // 版本号取自包信息（build.gradle versionName），SSID 提示与协议默认值一致
+                text = "版本 ${remember {
+                    try { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+                    catch (_: Exception) { "" }
+                }} · SSID 默认 179",
                 fontSize = 11.sp,
                 color = TextSecondary.copy(alpha = 0.4f)
             )

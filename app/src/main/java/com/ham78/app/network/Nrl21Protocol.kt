@@ -1,9 +1,5 @@
 package com.ham78.app.network
 
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlin.math.max
-
 /**
  * NRL21 协议实现
  * 对讲通信协议，包含语音、心跳、文本、位置等消息类型
@@ -274,47 +270,6 @@ object Nrl21Protocol {
         if (data.size < FIXED_BUFFER_SIZE) return false
         val type = data[OFF_TYPE].toInt() and 0xFF
         return type == TYPE_VOICE || type == TYPE_OPUS
-    }
-
-    /**
-     * 判断是否为自己发送的包
-     */
-    fun isOwnPacket(data: ByteArray, callSign: String, ssid: Int = DEFAULT_SSID): Boolean {
-        val packet = decodePacket(data) ?: return false
-        return packet.callSign == callSign && packet.ssid == ssid
-    }
-
-    // ============== 辅助方法 ==============
-
-    private fun writeString(buffer: ByteBuffer, offset: Int, str: String, length: Int) {
-        for (i in 0 until length) {
-            val charCode = if (i < str.length) str[i].code else 0
-            buffer.put(offset + i, charCode.toByte())
-        }
-    }
-
-    private fun readString(buffer: ByteBuffer, offset: Int, length: Int): String {
-        val sb = StringBuilder()
-        for (i in 0 until length) {
-            val charCode = buffer.get(offset + i).toInt() and 0xFF
-            if (charCode != 0) {
-                sb.append(charCode.toChar())
-            }
-        }
-        return sb.toString()
-    }
-
-    private fun writeUint24(buffer: ByteBuffer, offset: Int, value: Int) {
-        buffer.put(offset, ((value shr 16) and 0xFF).toByte())
-        buffer.put(offset + 1, ((value shr 8) and 0xFF).toByte())
-        buffer.put(offset + 2, (value and 0xFF).toByte())
-    }
-
-    private fun readUint24(buffer: ByteBuffer, offset: Int): Int {
-        val b0 = buffer.get(offset).toInt() and 0xFF
-        val b1 = buffer.get(offset + 1).toInt() and 0xFF
-        val b2 = buffer.get(offset + 2).toInt() and 0xFF
-        return (b0 shl 16) + (b1 shl 8) + b2
     }
 
     /**

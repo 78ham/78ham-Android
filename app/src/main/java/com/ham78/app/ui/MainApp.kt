@@ -69,7 +69,6 @@ import androidx.compose.ui.unit.sp
 import com.ham78.app.network.ServerConnection
 import com.ham78.app.service.TalkService
 import com.ham78.app.ui.screens.ChannelScreen
-import com.ham78.app.ui.screens.MessageScreen
 import com.ham78.app.ui.screens.PttScreen
 import com.ham78.app.ui.screens.ServerScreen
 import com.ham78.app.ui.screens.SettingsScreen
@@ -125,6 +124,7 @@ fun MainApp(
     val isTransmitting by talkService.transmittingState.collectAsState()
     val isReceiving by talkService.receivingState.collectAsState()
     val playingVoiceClipId by talkService.playingVoiceClipId.collectAsState()
+    val listenRooms by talkService.listenRooms.collectAsState()
 
     val activeServer = remember(serverConnections, activeServerId) {
         serverConnections.find { it.serverId == activeServerId }
@@ -322,14 +322,22 @@ fun MainApp(
                         onReplayVoice = { clipId ->
                             talkService.replayVoice(clipId)
                         },
-                        playingVoiceClipId = playingVoiceClipId
+                        playingVoiceClipId = playingVoiceClipId,
+                        talkService = talkService
                     )
 
                     1 -> ChannelScreen(
                         serverConnections = serverConnections,
                         roomLists = roomLists,
+                        listenRooms = listenRooms,
                         onJoinRoom = { serverId, roomId ->
                             scope.launch { talkService.joinRoom(serverId, roomId) }
+                        },
+                        onListen = { serverId, roomId ->
+                            scope.launch { talkService.listenRoom(serverId, roomId) }
+                        },
+                        onStopListen = { serverId ->
+                            talkService.stopListening(serverId)
                         },
                         onRefresh = { serverId ->
                             refreshRoomList(serverId)
@@ -358,7 +366,7 @@ fun MainApp(
                         }
                     )
 
-                    3 -> SettingsScreen()
+                    3 -> SettingsScreen(onLogout = onLogout)
                 }
             }
         }

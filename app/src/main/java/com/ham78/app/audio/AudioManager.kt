@@ -128,7 +128,42 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
         Log.d(TAG, "Stopped transmitting")
     }
 
-    fun handleReceivedAudio(data: ByteArray, type: Int, callsign: String) {
+    /**
+     * 直接发送一段已生成的 PCM 信号（信号音/CW/DTMF/SSTV/尾音/TTS/录音回放）。
+     *
+     * 与语音发射互斥：PTT 正在按住时拒绝信号发送，避免两路音频叠加。
+     * 按 20ms 一帧切片，每帧独立编码发送，与麦克风路径走完全相同的链路。
+     */
+    fun transmitPcm(pcm: ByteArray): Boolean {
+        if (_isTransmitting.value) return false
+
+        var offset = 0
+        while (offset < pcm.size) {
+            val end = minOf(offset + AudioRecorder.BYTES_PER_FRAME, pcm.size)
+            val frameData = if (end - offset == AudioRecorder.BYTES_PER_FRAME) {
+                pcm.copyOfRange(offset, end)   // 整帧
+            } else {
+                // 最后一帧不足 20ms：补零对齐，保证编码器拿到完整帧
+                val padded = ByteArray(AudioRecorder.BYTES_PER_FRAME)
+                System.arraycopy(pcm, offset, padded, 0, end - offset)
+                padded
+            }
+
+            val encodedData = when (codec) {
+                AudioCodec.G711 -> g711Codec.encodePcmToAlaw(frameData)
+                AudioCodec.OPUS -> opusCodec.encode(frameData)
+            }
+            udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
+            offset = end
+        }
+        return true
+    }
+
+    /**
+     * 播放一个已解码的接收语音帧，并维护 RX 状态与超时监护。
+     * 语音包的解码在 MultiServerManager 统一做（每包一次），这里只管播放。
+     */
+    fun handleReceivedPcm(pcmData: ByteArray?, callsign: String) {
         if (_isTransmitting.value) return
 
         _lastReceivedCallsign.value = callsign
@@ -151,8 +186,9 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
             }
         }
 
-        val pcmData = decodeToPcm(data, type) ?: return
-        player.playAudio(pcmData)
+        if (pcmData != null && pcmData.isNotEmpty()) {
+            player.playAudio(pcmData)
+        }
     }
 
     /**

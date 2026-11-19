@@ -1,5 +1,13 @@
 package com.ham78.app.ui.screens
 
+import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,8 +24,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -37,13 +53,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import com.ham78.app.network.MessageStore
 import com.ham78.app.network.ServerConnection
+import com.ham78.app.service.TalkService
 import com.ham78.app.ui.theme.BrandCyan
+import com.ham78.app.ui.theme.BrandPink
 import com.ham78.app.ui.theme.BrandPurple
 import com.ham78.app.ui.theme.PttTransmitting
 import com.ham78.app.ui.theme.ServerOffline
@@ -69,7 +93,8 @@ fun PttScreen(
     onSendMessage: (String) -> Unit,
     onSendLocation: () -> Unit,
     onReplayVoice: (String) -> Unit = {},
-    playingVoiceClipId: String? = null
+    playingVoiceClipId: String? = null,
+    talkService: TalkService? = null   // 发送工具面板需要；测试环境可为空
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -245,6 +270,28 @@ fun PttScreen(
                             .padding(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // 发送工具：CW/DTMF/SSTV/TTS/录音
+                        var showTools by remember { mutableStateOf(false) }
+                        IconButton(
+                            onClick = { showTools = true },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Apps,
+                                contentDescription = "发送工具",
+                                tint = BrandPurple,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        if (showTools) {
+                            talkService?.let { svc ->
+                                TransmitToolsDialog(
+                                    talkService = svc,
+                                    onDismiss = { showTools = false }
+                                )
+                            }
+                        }
+
                         IconButton(
                             onClick = onSendLocation,
                             modifier = Modifier.size(40.dp)
@@ -330,3 +377,4 @@ private fun StatusBadge(label: String, color: Color, showWave: Boolean = false) 
         }
     }
 }
+

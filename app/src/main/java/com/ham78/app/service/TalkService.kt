@@ -18,6 +18,14 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.ham78.app.R
 import com.ham78.app.audio.AudioManager
+import com.ham78.app.audio.CwEncoder
+import com.ham78.app.audio.DtmfEncoder
+import com.ham78.app.audio.MemoRecorder
+import com.ham78.app.audio.RogerBeep
+import com.ham78.app.audio.SstvEncoder
+import com.ham78.app.audio.TtsAnnouncer
+import com.ham78.app.data.BroadcastSchedule
+import com.ham78.app.data.ScheduleMode
 import com.ham78.app.data.ServerConfig
 import com.ham78.app.data.SettingsRepository
 import com.ham78.app.location.LocationManager
@@ -34,11 +42,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -75,6 +83,10 @@ class TalkService : Service() {
     private lateinit var networkMonitor: NetworkMonitor
     private val pttBroadcastReceivers = mutableListOf<BroadcastReceiver>()
 
+    // 发送工具：TTS 播报与录音回放（懒创建，只在第一次用时初始化）
+    private var ttsAnnouncer: TtsAnnouncer? = null
+    private var memoRecorder: MemoRecorder? = null
+
     // 后台保活：防止 CPU 休眠和 Wi-Fi 休眠导致 UDP 心跳中断被服务器踢下线
     private var keepAliveWakeLock: PowerManager.WakeLock? = null
     private var keepAliveWifiLock: WifiManager.WifiLock? = null
@@ -87,9 +99,6 @@ class TalkService : Service() {
 
     private val _isLoggedIn = MutableStateFlow(false)
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
-
-    private val _receivedMessages = MutableSharedFlow<VoiceMessage>(extraBufferCapacity = 64)
-    val receivedMessages: SharedFlow<VoiceMessage> = _receivedMessages
 
     val transmittingState: StateFlow<Boolean> get() = multiServerManager.transmittingState
     val receivingState: StateFlow<Boolean> get() = multiServerManager.receivingState
@@ -139,6 +148,7 @@ class TalkService : Service() {
         acquireKeepAliveLocks()
 
         autoConnectAllServers()
+        startScheduleWatcher()
 
         return START_STICKY
     }
@@ -230,6 +240,10 @@ class TalkService : Service() {
         multiServerManager.release()
         pttController.release()
         networkMonitor.stop()
+        ttsAnnouncer?.release()
+        ttsAnnouncer = null
+        memoRecorder?.cancel()
+        memoRecorder = null
         serviceScope.cancel()
 
         PttButtonReceiver.listener = null
@@ -269,6 +283,15 @@ class TalkService : Service() {
     suspend fun joinRoom(serverId: String, roomId: Int) =
         multiServerManager.joinRoom(serverId, roomId)
 
+    /** 只收听模式：接收该服务器的房间语音，不影响发送目标 */
+    suspend fun listenRoom(serverId: String, roomId: Int) =
+        multiServerManager.joinRoom(serverId, roomId, asListen = true)
+
+    /** 停止收听某台服务器 */
+    fun stopListening(serverId: String) = multiServerManager.stopListening(serverId)
+
+    val listenRooms: StateFlow<Map<String, Int>> get() = multiServerManager.listenRooms
+
     suspend fun loadRoomList(serverId: String): List<ApiClient.RoomInfo> =
         multiServerManager.loadRoomList(serverId)
 
@@ -293,6 +316,193 @@ class TalkService : Service() {
 
     fun stopReplayVoice() {
         multiServerManager.stopVoiceClip()
+    }
+
+    // ============== 发送工具（CW/DTMF/SSTV/TTS/录音） ==============
+    // 所有入口统一走 transmitPcmToActive → AudioManager.transmitPcm：
+    // 编码、切帧、发 UDP 都在那一条链路上，这里只负责"生成 PCM"。
+
+    /** 发送 CW（摩尔斯电码）文本 */
+    suspend fun sendCw(text: String, wpm: Int = 15): Boolean {
+        if (text.isBlank()) return false
+        val pcm = CwEncoder.encode(text, wpm)
+        return sendPcmAndLog(pcm, "CW", text.take(30))
+    }
+
+    /** 发送 DTMF 拨号音序列（中继台控制命令等） */
+    suspend fun sendDtmf(digits: String): Boolean {
+        if (digits.isBlank()) return false
+        val pcm = DtmfEncoder.encode(digits)
+        return sendPcmAndLog(pcm, "DTMF", digits)
+    }
+
+    /**
+     * 发送 SSTV 图片（Robot36 制式）。
+     * pixels 是已缩放到 320×240 的 ARGB 像素数组。
+     */
+    suspend fun sendSstv(pixels: IntArray, width: Int = 320, height: Int = 240): Boolean {
+        val pcm = SstvEncoder.encodeRobot36(pixels, width, height)
+        return sendPcmAndLog(pcm, "SSTV", "Robot36 ${width}x$height")
+    }
+
+    /** TTS 文字播报：合成语音后发射，播完自动追加尾音 */
+    suspend fun sendTts(text: String): Boolean {
+        if (text.isBlank()) return false
+        val announcer = ttsAnnouncer ?: TtsAnnouncer(this).also { ttsAnnouncer = it }
+        val pcm = announcer.synthesize(text) ?: run {
+            showToast("TTS 合成失败（引擎未就绪或不支持中文）")
+            return false
+        }
+        return sendPcmAndLog(pcm, "TTS", text.take(30))
+    }
+
+    // --- 录音回放状态：UI 需要知道"正在录音"来显示计时器 ---
+
+    private val _isMemoRecording = MutableStateFlow(false)
+    val isMemoRecording: StateFlow<Boolean> = _isMemoRecording.asStateFlow()
+
+    private val _memoRecordSeconds = MutableStateFlow(0)
+    val memoRecordSeconds: StateFlow<Int> = _memoRecordSeconds.asStateFlow()
+
+    /** 开始本机录音（最长 60 秒，UI 显示计时） */
+    suspend fun startMemoRecording(): Boolean {
+        val recorder = memoRecorder ?: MemoRecorder(this).also { memoRecorder = it }
+        val started = recorder.start()
+        if (!started) {
+            showToast("没有录音权限")
+            return false
+        }
+
+        _isMemoRecording.value = true
+        _memoRecordSeconds.value = 0
+        // 计时协程：每秒 +1，录音结束后自动退出
+        serviceScope.launch {
+            while (_isMemoRecording.value) {
+                delay(1000)
+                if (_isMemoRecording.value) _memoRecordSeconds.value += 1
+            }
+        }
+        return true
+    }
+
+    /** 结束录音并把整段录音发射出去 */
+    suspend fun stopMemoRecordingAndSend(): Boolean {
+        val recorder = memoRecorder ?: return false
+        _isMemoRecording.value = false
+        val pcm = recorder.stopAndTake() ?: run {
+            showToast("没有录到内容")
+            return false
+        }
+        return sendPcmAndLog(pcm, "录音", "${pcm.size / 16}ms")
+    }
+
+    /** 取消录音（丢弃） */
+    fun cancelMemoRecording() {
+        _isMemoRecording.value = false
+        memoRecorder?.cancel()
+    }
+
+    /** 统一的 PCM 发送入口：发出去 → 记一条消息 → 追加尾音 */
+    private suspend fun sendPcmAndLog(pcm: ByteArray, label: String, summary: String): Boolean {
+        val activeId = multiServerManager.activeServerId.value
+        val sent = multiServerManager.transmitPcmToActive(pcm)
+        if (!sent) {
+            Log.w(TAG, "send$label failed: no active room or busy")
+            showToast("发送失败：请先加入频道（或 PTT 正在发射）")
+            return false
+        }
+
+        // 信号发送也进消息流，用户能看到发过什么
+        val callsign = _serverConnections.value.find { it.serverId == activeId }?.callsign ?: ""
+        addOwnMessage(
+            activeId, callsign, DEFAULT_SSID,
+            "[$label] $summary",
+            MessageStore.MessageType.TEXT
+        )
+
+        // 非尾音来源的信号发送完都自动追加当前设置的尾音
+        appendRogerBeep()
+        return true
+    }
+
+    // ============== 尾音（Roger Beep） ==============
+
+    /** 把当前设置的尾音发送到活跃房间（NONE 时静默跳过） */
+    private suspend fun appendRogerBeep() {
+        val style = settingsRepository.settings.value.rogerBeep
+        if (style == com.ham78.app.data.RogerBeepStyle.NONE) return
+
+        val pcm = RogerBeep.encode(style)
+        if (pcm.isEmpty()) return
+        multiServerManager.transmitPcmToActive(pcm)
+        Log.d(TAG, "Roger beep sent: $style")
+    }
+
+    // ============== 定时播报 ==============
+
+    /**
+     * 定时播报调度协程：每 30 秒对表一次，命中分钟边界时触发任务。
+     *
+     * 触发去重：EVERY_* 模式用"上一个已触发的分钟序号"防重复；
+     * DAILY 用"今天已触发的任务 ID 集合"。两者都存内存，重启后重新计时无妨。
+     */
+    private var lastScheduleMinute = -1
+    private val firedDailyToday = mutableSetOf<String>()
+    private var firedDailyDate = ""
+
+    fun startScheduleWatcher() {
+        serviceScope.launch {
+            while (isActive) {
+                runScheduledBroadcasts()
+                delay(30_000)   // 30 秒对表一次：分钟级任务，延迟最多半分钟，可接受
+            }
+        }
+    }
+
+    private suspend fun runScheduledBroadcasts() {
+        val schedules = settingsRepository.settings.value.broadcastSchedules
+        if (schedules.isEmpty()) return
+
+        val now = java.time.LocalDateTime.now()
+        val minuteOfDay = now.hour * 60 + now.minute
+        val today = now.toLocalDate().toString()
+
+        // 日期变化时清掉"今天已触发"记录
+        if (today != firedDailyDate) {
+            firedDailyDate = today
+            firedDailyToday.clear()
+        }
+        // 分钟序号倒退（跨午夜/手动改时间）时重置去重
+        if (minuteOfDay < lastScheduleMinute) lastScheduleMinute = -1
+
+        for (schedule in schedules) {
+            if (!schedule.enabled) continue
+            val due = when (schedule.mode) {
+                ScheduleMode.EVERY_MINUTE -> true
+                ScheduleMode.EVERY_5_MIN -> minuteOfDay % 5 == 0
+                ScheduleMode.EVERY_15_MIN -> minuteOfDay % 15 == 0
+                ScheduleMode.DAILY -> minuteOfDay == schedule.dailyMinuteOfDay()
+            }
+            if (!due) continue
+
+            // 去重：DAILY 每天一次（firedDailyToday 记录今天已触发的任务 ID）；
+            // EVERY_* 每分钟一次（lastScheduleMinute 记录上一轮跑到的分钟）
+            if (schedule.mode == ScheduleMode.DAILY) {
+                if (!firedDailyToday.add(schedule.id)) continue   // 今天已触发过
+            } else if (lastScheduleMinute == minuteOfDay) {
+                continue                                          // 本分钟已经跑过一轮
+            }
+
+            Log.d(TAG, "Scheduled broadcast: ${schedule.name} (mode=${schedule.mode})")
+            sendTts(schedule.content)
+        }
+
+        lastScheduleMinute = minuteOfDay
+    }
+
+    /** 手动立刻执行一条定时播报（UI"试播"按钮用） */
+    suspend fun testBroadcast(schedule: BroadcastSchedule) {
+        sendTts(schedule.content)
     }
 
     fun handleKeyEvent(event: android.view.KeyEvent): Boolean =
@@ -439,10 +649,6 @@ class TalkService : Service() {
                     voiceDurationMs = durationMs
                 )
             )
-
-            serviceScope.launch {
-                _receivedMessages.emit(VoiceMessage(callsign, ssid, content, timestamp, 1))
-            }
         }
     }
 
@@ -675,12 +881,4 @@ class TalkService : Service() {
             Toast.makeText(this@TalkService, message, Toast.LENGTH_SHORT).show()
         }
     }
-
-    data class VoiceMessage(
-        val callsign: String,
-        val ssid: Int,
-        val content: String,
-        val timestamp: String,
-        val type: Int
-    )
 }

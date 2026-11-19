@@ -71,14 +71,18 @@ import com.ham78.app.ui.theme.TextPrimary
 import com.ham78.app.ui.theme.TextSecondary
 
 /**
- * 频道页：按服务器分组的频道列表，每个服务器可折叠展开
+ * 频道页：按服务器分组的频道列表，每个服务器可折叠展开。
+ * 每个频道可"加入"（可发可收）或"收听"（只收不发），收听中的频道显示耳朵标记。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChannelScreen(
     serverConnections: List<ServerConnection>,
     roomLists: Map<String, List<ApiClient.RoomInfo>>,
+    listenRooms: Map<String, Int> = emptyMap(),
     onJoinRoom: (serverId: String, roomId: Int) -> Unit,
+    onListen: (serverId: String, roomId: Int) -> Unit = { _, _ -> },
+    onStopListen: (serverId: String) -> Unit = {},
     onRefresh: (serverId: String) -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
@@ -187,7 +191,10 @@ fun ChannelScreen(
                             rooms = roomLists[conn.serverId] ?: emptyList(),
                             isLoading = !roomLists.containsKey(conn.serverId) && conn.isOnline,
                             searchQuery = searchQuery,
+                            listeningRoomId = listenRooms[conn.serverId],
                             onJoinRoom = onJoinRoom,
+                            onListen = onListen,
+                            onStopListen = { onStopListen(conn.serverId) },
                             onRefresh = { onRefresh(conn.serverId) }
                         )
                     }
@@ -205,7 +212,10 @@ private fun ServerChannelSection(
     rooms: List<ApiClient.RoomInfo>,
     isLoading: Boolean,
     searchQuery: String,
+    listeningRoomId: Int? = null,   // 该服务器上收听中的房间号；null = 没有收听
     onJoinRoom: (serverId: String, roomId: Int) -> Unit,
+    onListen: (serverId: String, roomId: Int) -> Unit = { _, _ -> },
+    onStopListen: () -> Unit = {},
     onRefresh: () -> Unit
 ) {
     // 默认收起；选中房间所在的服务器组自动展开，展示"当前"标记
@@ -331,14 +341,46 @@ private fun ServerChannelSection(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        // 收听中的服务器组提示条：一键停听
+                        if (listeningRoomId != null) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = BrandPurple.copy(alpha = 0.12f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "🎧 收听中 · 频道 $listeningRoomId",
+                                        fontSize = 12.sp,
+                                        color = BrandPurple,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(onClick = onStopListen) {
+                                        Text("停听", fontSize = 12.sp, color = TextSecondary)
+                                    }
+                                }
+                            }
+                        }
+
                         filteredRooms.forEach { room ->
+                            val isCurrent = room.id == connection.currentRoomId
+                            val isListening = room.id == listeningRoomId && !isCurrent
                             ChannelItem(
                                 room = room,
-                                isCurrentRoom = room.id == connection.currentRoomId,
+                                isCurrentRoom = isCurrent,
+                                isListening = isListening,
                                 onClick = {
-                                    if (room.id != connection.currentRoomId) {
+                                    if (!isCurrent) {
                                         onJoinRoom(connection.serverId, room.id)
                                     }
+                                },
+                                onListenClick = {
+                                    // 收听中的频道点耳朵 = 停止收听；否则开始收听
+                                    if (isListening) onStopListen()
+                                    else onListen(connection.serverId, room.id)
                                 }
                             )
                         }
@@ -353,7 +395,9 @@ private fun ServerChannelSection(
 fun ChannelItem(
     room: ApiClient.RoomInfo,
     isCurrentRoom: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    isListening: Boolean = false,        // 收听中（只收不发）
+    onListenClick: () -> Unit = {}       // 点耳朵图标：开始/停止收听
 ) {
     Card(
         modifier = Modifier
@@ -361,7 +405,11 @@ fun ChannelItem(
             .clickable { onClick() },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isCurrentRoom) BrandPurple.copy(alpha = 0.16f) else SurfaceElevated
+            containerColor = when {
+                isCurrentRoom -> BrandPurple.copy(alpha = 0.16f)
+                isListening -> BrandPurple.copy(alpha = 0.08f)
+                else -> SurfaceElevated
+            }
         ),
         border = if (isCurrentRoom) BorderStroke(
             1.5.dp, BrandPurple.copy(alpha = 0.6f)
@@ -412,6 +460,10 @@ fun ChannelItem(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        if (isListening) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("🎧 收听中", fontSize = 11.sp, color = BrandPurple)
+                        }
                     }
                     Spacer(modifier = Modifier.height(2.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -461,8 +513,20 @@ fun ChannelItem(
                     }
                 }
             } else {
-                TextButton(onClick = onClick) {
-                    Text("加入", fontSize = 13.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 耳朵开关：收听该频道（只收不发）；收听中高亮
+                    IconButton(
+                        onClick = onListenClick,
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Text(
+                            text = if (isListening) "🎧" else "👂",
+                            fontSize = 16.sp
+                        )
+                    }
+                    TextButton(onClick = onClick) {
+                        Text("加入", fontSize = 13.sp)
+                    }
                 }
             }
         }

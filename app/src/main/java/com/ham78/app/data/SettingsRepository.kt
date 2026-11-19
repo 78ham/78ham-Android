@@ -63,7 +63,9 @@ class SettingsRepository(context: Context) {
             screenOffPtt = stored.getBoolean(KEY_SCREEN_OFF_PTT, true),
             pttKeyCode = stored.getInt(KEY_PTT_KEY, KeyEvent.KEYCODE_VOLUME_UP),
             autoConnect = stored.getBoolean(KEY_AUTO_CONNECT, true),
-            servers = loadServerList()
+            servers = loadServerList(),
+            rogerBeep = parseRogerBeep(stored.getString(KEY_ROGER_BEEP, null)),
+            broadcastSchedules = loadSchedules()
         )
     }
 
@@ -83,6 +85,8 @@ class SettingsRepository(context: Context) {
             putInt(KEY_PTT_KEY, settings.pttKeyCode)
             putBoolean(KEY_AUTO_CONNECT, settings.autoConnect)
             putString(KEY_SERVERS, gson.toJson(settings.servers))
+            putString(KEY_ROGER_BEEP, settings.rogerBeep.name)
+            putString(KEY_SCHEDULES, gson.toJson(settings.broadcastSchedules))
             apply()
         }
         _settings.value = settings
@@ -131,6 +135,46 @@ class SettingsRepository(context: Context) {
         AudioCodec.G711
     }
 
+    private fun parseRogerBeep(value: String?): RogerBeepStyle = try {
+        value?.let { RogerBeepStyle.valueOf(it) } ?: RogerBeepStyle.NONE
+    } catch (_: IllegalArgumentException) {
+        RogerBeepStyle.NONE
+    }
+
+    // --- 定时播报任务的增删改查：和服务器列表同一套 Gson 持久化套路 ---
+
+    fun loadSchedules(): List<BroadcastSchedule> {
+        val json = prefs.getString(KEY_SCHEDULES, "[]") ?: "[]"
+        return parseSchedules(json)
+    }
+
+    fun saveSchedules(schedules: List<BroadcastSchedule>) {
+        prefs.edit().putString(KEY_SCHEDULES, gson.toJson(schedules)).apply()
+        _settings.value = _settings.value.copy(broadcastSchedules = schedules)
+    }
+
+    fun addSchedule(schedule: BroadcastSchedule) {
+        val schedules = loadSchedules().toMutableList()
+        schedules.removeAll { it.id == schedule.id }
+        schedules.add(schedule)
+        saveSchedules(schedules)
+    }
+
+    fun removeSchedule(scheduleId: String) {
+        saveSchedules(loadSchedules().filter { it.id != scheduleId })
+    }
+
+    fun updateSchedule(schedule: BroadcastSchedule) {
+        addSchedule(schedule)   // addSchedule 已按 id 去重，等价于更新
+    }
+
+    private fun parseSchedules(json: String): List<BroadcastSchedule> = try {
+        val type = object : TypeToken<List<BroadcastSchedule>>() {}.type
+        gson.fromJson<List<BroadcastSchedule>>(json, type) ?: emptyList()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
     private fun parseServerList(json: String): List<ServerConfig> = try {
         val type = object : TypeToken<List<ServerConfig>>() {}.type
         gson.fromJson<List<ServerConfig>>(json, type) ?: emptyList()
@@ -154,6 +198,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_PTT_KEY = "ptt_key"
         private const val KEY_AUTO_CONNECT = "auto_connect"
         private const val KEY_SERVERS = "servers"
+        private const val KEY_ROGER_BEEP = "roger_beep"
+        private const val KEY_SCHEDULES = "broadcast_schedules"
 
         // 所有 SettingsRepository 实例共享的设置流
         private val _sharedSettings = MutableStateFlow(UserSettings.DEFAULT)

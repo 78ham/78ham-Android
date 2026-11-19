@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 GitHub Release 需要 contents 写权限（默认 GITHUB_TOKEN 只读）
     steps:
       - uses: actions/checkout@v4
 

@@ -41,6 +41,8 @@ import com.ham78.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -299,7 +301,21 @@ class TalkService : Service() {
 
     fun startTransmitting(): Boolean = multiServerManager.startTransmitting()
 
-    fun stopTransmitting() = multiServerManager.stopTransmitting()
+    /**
+     * 松开 PTT：停录 + 自动追加尾音。
+     *
+     * 尾音必须挂在这里发——之前它只在"发信号"（CW/DTMF/SSTV/TTS/录音）之后追加，
+     * 普通语音讲话结束时反而一声不吭，这与业余无线电"讲完给个结束音"的习惯相反。
+     */
+    fun stopTransmitting() {
+        // 先记下"刚才确实在发话"：没发过话就不该有结束音
+        val wasTransmitting = multiServerManager.isActivelyTransmitting()
+        multiServerManager.stopTransmitting()
+        if (wasTransmitting) {
+            // 独立协程：stopTransmitting 来自按键回调，不能是挂起函数
+            serviceScope.launch { appendRogerBeep() }
+        }
+    }
 
     fun isTransmitting(): Boolean = multiServerManager.isTransmitting()
     fun isReceiving(): Boolean = multiServerManager.isReceiving()
@@ -325,14 +341,15 @@ class TalkService : Service() {
     /** 发送 CW（摩尔斯电码）文本 */
     suspend fun sendCw(text: String, wpm: Int = 15): Boolean {
         if (text.isBlank()) return false
-        val pcm = CwEncoder.encode(text, wpm)
+        // 编码是纯 CPU 计算（长文本能到几百毫秒），放到 IO 线程，别卡住界面
+        val pcm = withContext(Dispatchers.Default) { CwEncoder.encode(text, wpm) }
         return sendPcmAndLog(pcm, "CW", text.take(30))
     }
 
     /** 发送 DTMF 拨号音序列（中继台控制命令等） */
     suspend fun sendDtmf(digits: String): Boolean {
         if (digits.isBlank()) return false
-        val pcm = DtmfEncoder.encode(digits)
+        val pcm = withContext(Dispatchers.Default) { DtmfEncoder.encode(digits) }
         return sendPcmAndLog(pcm, "DTMF", digits)
     }
 
@@ -341,7 +358,10 @@ class TalkService : Service() {
      * pixels 是已缩放到 320×240 的 ARGB 像素数组。
      */
     suspend fun sendSstv(pixels: IntArray, width: Int = 320, height: Int = 240): Boolean {
-        val pcm = SstvEncoder.encodeRobot36(pixels, width, height)
+        // Robot36 要生成 36 秒音频（约 576KB），必须在后台线程做
+        val pcm = withContext(Dispatchers.Default) {
+            SstvEncoder.encodeRobot36(pixels, width, height)
+        }
         return sendPcmAndLog(pcm, "SSTV", "Robot36 ${width}x$height")
     }
 
@@ -402,10 +422,21 @@ class TalkService : Service() {
         memoRecorder?.cancel()
     }
 
-    /** 统一的 PCM 发送入口：发出去 → 记一条消息 → 追加尾音 */
+    /**
+     * 统一的 PCM 发送入口：发出去 → 记一条消息 → 追加尾音。
+     *
+     * 【关键】用 serviceScope 而不是调用方的协程作用域来发：
+     * 调用方是 UI（rememberCoroutineScope），用户一发 SSTV 就把对话框关掉的话，
+     * UI 作用域被取消 → 正在发的那一半图片直接没了（服务端那边听到的是半张图）。
+     * 信号发射属于"已经承诺要做的事"，不该被界面关闭打断。
+     */
     private suspend fun sendPcmAndLog(pcm: ByteArray, label: String, summary: String): Boolean {
         val activeId = multiServerManager.activeServerId.value
-        val sent = multiServerManager.transmitPcmToActive(pcm)
+        // 发射动作放到 serviceScope 里跑：它的生命周期跟着服务走，
+        // 不受 UI 作用域（rememberCoroutineScope）取消的影响。
+        // 等待时用 NonCancellable，保证"已经开始发"的信号一定发完。
+        val job = serviceScope.async { multiServerManager.transmitPcmToActive(pcm) }
+        val sent = withContext(NonCancellable) { job.await() }
         if (!sent) {
             Log.w(TAG, "send$label failed: no active room or busy")
             showToast("发送失败：请先加入频道（或 PTT 正在发射）")
@@ -427,7 +458,10 @@ class TalkService : Service() {
 
     // ============== 尾音（Roger Beep） ==============
 
-    /** 把当前设置的尾音发送到活跃房间（NONE 时静默跳过） */
+    /**
+     * 把当前设置的尾音发送到活跃房间（NONE 时静默跳过）。
+     * 两个调用来源：松开 PTT（讲完话）、发送信号之后（CW/DTMF/SSTV/TTS/录音）。
+     */
     private suspend fun appendRogerBeep() {
         val style = settingsRepository.settings.value.rogerBeep
         if (style == com.ham78.app.data.RogerBeepStyle.NONE) return

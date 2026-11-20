@@ -63,11 +63,11 @@ object CwEncoder {
             } else {
                 word.forEachIndexed { charIdx, c ->
                     val pattern = MORSE[c] ?: return@forEachIndexed   // 不认识的字符跳过
-                    if (charIdx > 0) out.write(Tone.silence(ditMs * 3)) // 字符间隔 3 点
+                    if (charIdx > 0) out.write(silence(ditMs * 3)) // 字符间隔 3 点
                     appendSymbol(out, pattern, ditMs, dahMs)
                 }
             }
-            if (wordIdx < words.size - 1) out.write(Tone.silence(ditMs * 7)) // 词间隔 7 点
+            if (wordIdx < words.size - 1) out.write(silence(ditMs * 7)) // 词间隔 7 点
         }
         return out.toByteArray()
     }
@@ -75,11 +75,21 @@ object CwEncoder {
     /** 把一串点划（一个字符或 prosign）转成音频写入输出流 */
     private fun appendSymbol(out: java.io.ByteArrayOutputStream, pattern: String, ditMs: Int, dahMs: Int) {
         pattern.forEachIndexed { i, ch ->
-            if (i > 0) out.write(Tone.silence(ditMs))            // 符号内间隔 1 点
+            if (i > 0) out.write(silence(ditMs))            // 符号内间隔 1 点
             when (ch) {
                 '.' -> out.write(Tone.sine(TONE_HZ, ditMs, AMPLITUDE))
                 '-' -> out.write(Tone.sine(TONE_HZ, dahMs, AMPLITUDE))
             }
         }
     }
+
+    /**
+     * 字符间隔的静音块：同一段文本里长度都一样，按长度缓存复用，
+     * 避免长文本反复分配同样大小的静音数组。
+     */
+    private val silenceCache = HashMap<Int, ByteArray>()
+
+    /** 取一段指定长度的静音（带缓存） */
+    private fun silence(ms: Int): ByteArray =
+        silenceCache.getOrPut(ms) { Tone.silence(ms) }
 }

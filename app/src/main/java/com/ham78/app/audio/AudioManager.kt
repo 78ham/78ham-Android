@@ -119,6 +119,9 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
         return success
     }
 
+    /** 此刻是否正在发射（同步真值，不经过 StateFlow 的异步同步） */
+    fun isTransmitting(): Boolean = _isTransmitting.value
+
     fun stopTransmitting() {
         recorder.stopRecording()
         _isTransmitting.value = false
@@ -133,12 +136,29 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
      *
      * 与语音发射互斥：PTT 正在按住时拒绝信号发送，避免两路音频叠加。
      * 按 20ms 一帧切片，每帧独立编码发送，与麦克风路径走完全相同的链路。
+     *
+     * 【关键】按真实时间节奏逐帧发，而不是一口气把整段塞进 UDP：
+     * 老写法是一个 for 循环把全部帧瞬间发出，SSTV 一张图就是 2880 个 UDP 包
+     * 挤在一起，服务端 socket 缓冲区直接溢出丢包，接收端听到的是断断续续的碎音。
+     * 现在每帧之间按 20ms 的真实间隔等待，收发两侧的节奏才对得上。
      */
-    fun transmitPcm(pcm: ByteArray): Boolean {
+    suspend fun transmitPcm(pcm: ByteArray): Boolean {
         if (_isTransmitting.value) return false
 
         var offset = 0
+        var frameIndex = 0
+        val totalFrames = (pcm.size + AudioRecorder.BYTES_PER_FRAME - 1) / AudioRecorder.BYTES_PER_FRAME
+        val startedAt = System.nanoTime()
+
         while (offset < pcm.size) {
+            // 帧调度：等到"这一帧该发的时间点"再发。
+            // 用累计基准而不是每帧 delay(20)，避免累积漂移导致信号整体变调/变慢。
+            val dueAt = startedAt + frameIndex * AudioRecorder.FRAME_MS * 1_000_000L
+            val waitNs = dueAt - System.nanoTime()
+            if (waitNs > 0) {
+                delay(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
+            }
+
             val end = minOf(offset + AudioRecorder.BYTES_PER_FRAME, pcm.size)
             val frameData = if (end - offset == AudioRecorder.BYTES_PER_FRAME) {
                 pcm.copyOfRange(offset, end)   // 整帧
@@ -154,8 +174,12 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
                 AudioCodec.OPUS -> opusCodec.encode(frameData)
             }
             udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
+
             offset = end
+            frameIndex++
         }
+
+        Log.d(TAG, "Signal transmitted: $totalFrames frames (${pcm.size} bytes)")
         return true
     }
 

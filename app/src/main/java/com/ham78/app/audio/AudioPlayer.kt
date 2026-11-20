@@ -41,10 +41,17 @@ class AudioPlayer(private val context: Context) {
         private const val MAX_QUEUE_SIZE = 50
         private const val JITTER_BUFFER_FRAMES = 4
         private const val JITTER_HIGH_THRESHOLD = 15
+
+        /** 预缓冲期间的等待间隔：够短保证低延迟，又不至于空转烧 CPU */
+        private const val PRIMING_POLL_MS = 5L
     }
 
     private var audioTrack: AudioTrack? = null
     private var audioManager: AndroidAudioManager? = null
+
+    // 播放器初始化加锁：网络线程可能同时送来多帧，
+    // 不加锁会重复创建 AudioTrack（旧的泄漏）并把队列里的数据清掉
+    private val initLock = Any()
 
     private val isPlaying = AtomicBoolean(false)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -59,26 +66,33 @@ class AudioPlayer(private val context: Context) {
     private val _currentPlayingClipId = MutableStateFlow<String?>(null)
     val currentPlayingClipId: StateFlow<String?> = _currentPlayingClipId.asStateFlow()
 
-    fun ensurePlayerReady(): Boolean {
+    fun ensurePlayerReady(): Boolean = synchronized(initLock) {
+        if (isPlaying.get()) return true
+
         audioTrack?.let { track ->
             if (track.state == AudioTrack.STATE_INITIALIZED) {
-                if (!isPlaying.get()) {
-                    resumePlayback()
-                }
+                resumePlayback()
                 return true
             }
         }
 
-        return startPlayback()
+        startPlayback()
     }
 
-    fun startPlayback(): Boolean {
+    fun startPlayback(): Boolean = synchronized(initLock) {
         if (isPlaying.get()) return true
 
         return try {
             audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AndroidAudioManager
-            audioManager?.isSpeakerphoneOn = true
-            audioManager?.mode = AndroidAudioManager.MODE_NORMAL
+            // 扬声器/音频模式属于"锦上添花"：这些接口需要 MODIFY_AUDIO_SETTINGS 权限，
+            // 拿不到时只影响外放路由，不该连累 AudioTrack 整个建不起来。
+            // （早期版本在这里直接抛 SecurityException，导致接收端完全没声音）
+            try {
+                audioManager?.isSpeakerphoneOn = true
+                audioManager?.mode = AndroidAudioManager.MODE_NORMAL
+            } catch (e: Exception) {
+                Log.w(TAG, "Speakerphone setup skipped: ${e.message}")
+            }
 
             val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
 
@@ -127,7 +141,7 @@ class AudioPlayer(private val context: Context) {
         }
     }
 
-    fun pausePlayback() {
+    fun pausePlayback() = synchronized(initLock) {
         try {
             audioTrack?.pause()
             isPlaying.set(false)
@@ -141,7 +155,7 @@ class AudioPlayer(private val context: Context) {
         }
     }
 
-    fun resumePlayback() {
+    fun resumePlayback() = synchronized(initLock) {
         try {
             if (audioTrack != null && audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
                 audioQueue.clear()
@@ -158,7 +172,7 @@ class AudioPlayer(private val context: Context) {
         }
     }
 
-    fun stopPlayback() {
+    fun stopPlayback() = synchronized(initLock) {
         isPlaying.set(false)
         playJob?.cancel()
         playJob = null
@@ -284,8 +298,13 @@ class AudioPlayer(private val context: Context) {
                     if (audioQueue.size >= JITTER_BUFFER_FRAMES) {
                         bufferReady = true
                     } else {
-                        // 阻塞等待新数据，避免忙轮询
-                        audioQueue.poll(20, TimeUnit.MILLISECONDS)
+                        // 预缓冲：等队列攒够几帧再开播。
+                        // 这里只能"看"不能"取"——旧代码用 poll(20ms) 等新数据，
+                        // 而 poll() 会把队头那帧取出来直接丢掉：
+                        // 网络每 20ms 送一帧、这里每 20ms 丢一帧，
+                        // 队列永远攒不满 4 帧，于是接收到的语音几乎全被吞掉。
+                        // 现在改成 delay 等一会儿，绝不消费队列。
+                        delay(PRIMING_POLL_MS)
                         continue
                     }
                 }

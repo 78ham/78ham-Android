@@ -97,6 +97,12 @@ fun PttScreen(
     talkService: TalkService? = null   // 发送工具面板需要；测试环境可为空
 ) {
     var inputText by remember { mutableStateOf("") }
+
+    // 发送工具面板的开关状态：必须声明在顶层。
+    // 之前声明在底部输入栏 Row 的 lambda 里，那个 lambda 每次重组都会重新执行，
+    // 面板刚打开就被重置成 false（表现为「点开就闪退／关不掉」）。
+    var showTools by remember { mutableStateOf(false) }
+
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size, messages.lastOrNull()?.id) {
@@ -271,7 +277,6 @@ fun PttScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // 发送工具：CW/DTMF/SSTV/TTS/录音
-                        var showTools by remember { mutableStateOf(false) }
                         IconButton(
                             onClick = { showTools = true },
                             modifier = Modifier.size(40.dp)

@@ -59,7 +59,9 @@ import com.ham78.app.ui.theme.SurfaceCard
 import com.ham78.app.ui.theme.TextOnPrimary
 import com.ham78.app.ui.theme.TextPrimary
 import com.ham78.app.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /*
  * 发送工具面板：CW、DTMF、SSTV、TTS 播报、录音发送。
@@ -217,11 +219,14 @@ private fun SstvToolPanel(talkService: TalkService) {
         if (uri != null) {
             scope.launch {
                 sending = true
-                val original = context.contentResolver.openInputStream(uri)?.use { stream ->
-                    android.graphics.BitmapFactory.decodeStream(stream)
-                }
-                val scaled = original?.let {
-                    android.graphics.Bitmap.createScaledBitmap(it, 320, 240, true)
+                // 解码与缩放都放到 IO 线程：一张大图在主线程解码会卡住界面
+                val scaled = withContext(Dispatchers.IO) {
+                    val original = context.contentResolver.openInputStream(uri)?.use { stream ->
+                        android.graphics.BitmapFactory.decodeStream(stream)
+                    }
+                    original?.let {
+                        android.graphics.Bitmap.createScaledBitmap(it, 320, 240, true)
+                    }
                 }
                 pickedBitmap = scaled
                 if (scaled != null) {
@@ -252,13 +257,35 @@ private fun SstvToolPanel(talkService: TalkService) {
         )
     }
 
+    // 注意 enabled 不能依赖 pickedBitmap：
+    // 没选图时按钮要是禁用的，用户就永远点不开选图对话框（死锁）。
+    // 选完图后再多一个独立的"发送"按钮。
     SendButton(
-        enabled = pickedBitmap != null && !sending,
+        enabled = !sending,
         sending = sending,
         label = if (pickedBitmap == null) "选择图片" else "重新选择图片",
         color = BrandPurple,
         action = { pickImage.launch("image/*") }
     )
+
+    // 已选好图时才出现发送按钮（选图动作本身已自动发射，这里允许重发）
+    if (pickedBitmap != null) {
+        Spacer(modifier = Modifier.height(8.dp))
+        SendButton(
+            enabled = !sending,
+            sending = sending,
+            label = "重新发送这张图",
+            color = BrandCyan
+        ) {
+            scope.launch {
+                sending = true
+                val pixels = IntArray(320 * 240)
+                pickedBitmap!!.getPixels(pixels, 0, 320, 0, 0, 320, 240)
+                talkService.sendSstv(pixels)
+                sending = false
+            }
+        }
+    }
 }
 
 // --- TTS 播报面板 ---

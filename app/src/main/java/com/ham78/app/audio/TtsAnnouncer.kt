@@ -4,6 +4,7 @@ import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import java.util.Locale
+import kotlin.coroutines.resume
 
 /*
  * TTS 文字转语音播报：把一段文字合成为语音 PCM，再经音频管线发射出去。
@@ -23,10 +24,12 @@ class TtsAnnouncer(private val context: Context) {
         private const val TAG = "TtsAnnouncer"
         private const val MAX_INPUT_LEN = 200      // 单条播报上限，防止超长文本卡语音信道
         private const val READY_TIMEOUT_MS = 8000L // TTS 引擎初始化兜底超时
+        private const val SYNTH_TIMEOUT_MS = 15000L // 单次合成兜底超时
     }
 
     private var tts: TextToSpeech? = null
     private var initStatus: Int? = null   // TTS 初始化结果；null = 还在初始化
+    private var progressListener: android.speech.tts.UtteranceProgressListener? = null
 
     /** 创建实例即开始异步初始化 TTS 引擎 */
     init {
@@ -63,38 +66,75 @@ class TtsAnnouncer(private val context: Context) {
         if (!awaitReady()) return null
 
         val clipText = text.take(MAX_INPUT_LEN)
-        val wavFile = kotlin.io.path.createTempFile(prefix = "tts_", suffix = ".wav")
+        // 用 cacheDir 而不是 java.nio.file：后者的 Path/Files 是 API 26+，
+        // 本项目 minSdk 23，在 Android 6/7 上会直接 NoClassDefFoundError。
+        val wavFile = java.io.File.createTempFile("tts_", ".wav", context.cacheDir)
 
         try {
-            // TTS 写 WAV 文件（File 模式合成，排队后异步写盘）
-            val result = tts?.synthesizeToFile(
-                clipText,
-                null,
-                java.io.File(wavFile.toString()),
-                "78ham_tts"
-            )
-            // synthesizeToFile 返回的是排队句柄，真正完成要等写盘；
-            // 简化处理：轮询文件大小稳定（连续 300ms 不再增长）视为写完
-            if (result == TextToSpeech.SUCCESS && waitForFileStable(wavFile)) {
-                return WavReader.readPcm8k(wavFile.toFile())
+            // 合成完成的信号：UtteranceProgressListener 的 onDone 最准，
+            // 文件大小轮询只作为兜底（有些引擎不回调 onDone）。
+            // withTimeoutOrNull 兜住"引擎既不回调也不写文件"的死等情况。
+            val done = kotlinx.coroutines.withTimeoutOrNull(SYNTH_TIMEOUT_MS) {
+                kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+                    val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+                    // UtteranceProgressListener 的三个方法都是抽象的，必须全部实现，
+                    // 少一个就编译不过（onStop 是 API 23 引入的，本项目 minSdk 23 正好可用）
+                    val listener = object : android.speech.tts.UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) = Unit
+                        override fun onDone(utteranceId: String?) {
+                            if (finished.compareAndSet(false, true)) cont.resume(true)
+                        }
+                        override fun onError(utteranceId: String?, errorCode: Int) {
+                            if (finished.compareAndSet(false, true)) cont.resume(false)
+                        }
+                        override fun onError(utteranceId: String?) {
+                            if (finished.compareAndSet(false, true)) cont.resume(false)
+                        }
+                        override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                            if (finished.compareAndSet(false, true)) cont.resume(false)
+                        }
+                    }
+                    progressListener = listener
+                    tts?.setOnUtteranceProgressListener(listener)
+
+                    val result = tts?.synthesizeToFile(clipText, null, wavFile, "78ham_tts")
+                    if (result != TextToSpeech.SUCCESS) {
+                        if (finished.compareAndSet(false, true)) cont.resume(false)
+                    }
+                }
             }
-            Log.w(TAG, "TTS synthesize failed, result=$result")
-            return null
+
+            // onDone 没来（引擎不回调）时退回"文件大小稳定"判断
+            val complete = done == true || waitForFileStable(wavFile)
+            if (!complete) {
+                Log.w(TAG, "TTS synthesis did not complete")
+                return null
+            }
+
+            val pcm = WavReader.readPcm8k(wavFile)
+            if (pcm == null) {
+                Log.w(TAG, "TTS WAV read failed (size=${wavFile.length()})")
+            }
+            return pcm
         } catch (e: Exception) {
             Log.e(TAG, "TTS synthesize error", e)
             return null
         } finally {
-            try { java.nio.file.Files.deleteIfExists(wavFile) } catch (_: Exception) {}
+            try { wavFile.delete() } catch (_: Exception) {}
+            progressListener = null
         }
     }
 
-    /** 轮询 WAV 文件直到大小稳定（写完），最长 10 秒 */
-    private suspend fun waitForFileStable(path: java.nio.file.Path): Boolean {
+    /**
+     * 轮询 WAV 文件直到大小稳定（写完），最长 10 秒。
+     * 用 java.io.File 而非 java.nio.file.Files：后者是 API 26+。
+     */
+    private suspend fun waitForFileStable(file: java.io.File): Boolean {
         var lastSize = -1L
         var stableCount = 0
         val deadline = System.currentTimeMillis() + 10_000
         while (System.currentTimeMillis() < deadline) {
-            val size = try { java.nio.file.Files.size(path) } catch (_: Exception) { 0L }
+            val size = try { file.length() } catch (_: Exception) { 0L }
             if (size > 44 && size == lastSize) {   // 44 = WAV 头最小长度
                 stableCount++
                 if (stableCount >= 3) return true   // 连续 300ms 大小不变 = 写完
@@ -140,26 +180,40 @@ class TtsAnnouncer(private val context: Context) {
 
         /**
          * 重采样到 8kHz 单声道。
-         * 多声道取首声道；频率比按整数取样点跳跃（线性抽取，语音场景足够）。
+         * 多声道取首声道；用线性插值而不是"隔点抽取"——
+         * 隔点抽取会把 22kHz 的高频折回基带，听起来又尖又毛（金属声）。
          */
         private fun resampleTo8k(src: ByteArray, sampleRate: Int, channels: Int): ByteArray {
             if (sampleRate == 8000 && channels == 1) return src
+            if (sampleRate <= 0) return ByteArray(0)
 
             val frameBytes = 2 * channels
             val srcFrames = src.size / frameBytes
-            val outFrames = srcFrames.toLong() * 8000 / sampleRate
-            val out = ByteArray((outFrames * 2).toInt())
+            if (srcFrames <= 0) return ByteArray(0)
 
-            for (i in 0 until outFrames.toInt()) {
-                // 输出第 i 帧对应输入第 (i * sampleRate / 8000) 帧的首声道样本
-                val srcIdx = (i.toLong() * sampleRate / 8000).toInt()
-                    .coerceAtMost(srcFrames - 1) * frameBytes
-                val sample = ((src[srcIdx + 1].toInt() shl 8) or (src[srcIdx].toInt() and 0xFF))
+            val outFrames = (srcFrames.toLong() * 8000 / sampleRate).toInt()
+            val out = ByteArray(outFrames * 2)
+            val ratio = sampleRate.toDouble() / 8000.0
+
+            for (i in 0 until outFrames) {
+                // 输出第 i 帧在输入中的位置（带小数），取相邻两点线性插值
+                val pos = i * ratio
+                val idx = pos.toInt().coerceAtMost(srcFrames - 1)
+                val frac = pos - idx
+                val next = (idx + 1).coerceAtMost(srcFrames - 1)
+
+                val s0 = readSample(src, idx * frameBytes)
+                val s1 = readSample(src, next * frameBytes)
+                val sample = (s0 + (s1 - s0) * frac).toInt()
                 out[i * 2] = (sample and 0xFF).toByte()
                 out[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
             }
             return out
         }
+
+        /** 从指定字节位置读一个 16bit 小端采样 */
+        private fun readSample(b: ByteArray, pos: Int): Double =
+            ((b[pos + 1].toInt() shl 8) or (b[pos].toInt() and 0xFF)).toDouble()
 
         private fun readShort(b: ByteArray, pos: Int): Int =
             (b[pos].toInt() and 0xFF) or ((b[pos + 1].toInt() and 0xFF) shl 8)

@@ -306,8 +306,11 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     /**
      * 把一段已生成的 PCM 信号（CW/DTMF/SSTV/尾音/TTS/录音）经活跃连接发送。
      * 返回 false = 没有活跃连接、未进房间或正在 PTT 发射。
+     *
+     * 挂起函数：信号按真实时间节奏逐帧发出（SSTV 一张图要发 36 秒），
+     * 调用方需要在协程里等它发完。
      */
-    fun transmitPcmToActive(pcm: ByteArray): Boolean {
+    suspend fun transmitPcmToActive(pcm: ByteArray): Boolean {
         val activeId = _activeServerId.value
         if (activeId.isEmpty()) return false
         val resources = connections[activeId] ?: return false
@@ -445,6 +448,15 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
 
     fun isTransmitting(): Boolean = _transmittingState.value
     fun isReceiving(): Boolean = _receivingState.value
+
+    /**
+     * 活跃连接此刻是否真的在发射（直接问 AudioManager，不经过 StateFlow）。
+     *
+     * _transmittingState 是靠 collect 异步同步过来的，按键刚松开的瞬间
+     * 它可能还没更新，用它判断会漏掉尾音。这里直接读源头，拿到的是真值。
+     */
+    fun isActivelyTransmitting(): Boolean =
+        getActiveConnection()?.audioManager?.isTransmitting() == true
 
     fun release() {
         connections.keys.toList().forEach { disconnectFromServer(it) }

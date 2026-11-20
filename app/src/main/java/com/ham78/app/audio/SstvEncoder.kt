@@ -36,6 +36,9 @@ object SstvEncoder {
     private const val R_Y_EVEN_SCAN_MS = 44      // 偶数行的 R-Y 扫描 44ms
     private const val B_Y_ODD_SCAN_MS = 44       // 奇数行的 B-Y 扫描 44ms
 
+    /** 扫描信号幅度：留余量，避免 FM 峰值叠加后削顶 */
+    private const val SCAN_AMPLITUDE = 0.6
+
     /**
      * 把 320×240 ARGB 像素数组编码为 Robot36 音频 PCM。
      * 耗时约 36 秒的音频：8kHz 采样下约 576KB，按 20ms 帧约 2880 个 UDP 包。
@@ -44,6 +47,8 @@ object SstvEncoder {
         require(pixels.size >= width * height) { "像素数组大小不足: ${pixels.size} < ${width * height}" }
 
         val out = java.io.ByteArrayOutputStream()
+        // 相位容器：整个图像共用一个，保证所有扫描段之间相位连续
+        val phase = DoubleArray(1)
 
         // --- 前导音 + VIS 头：唤醒接收端的 VOX 并声明制式 ---
         out.write(Tone.sine(1900, LEADER_MS))
@@ -61,18 +66,18 @@ object SstvEncoder {
             out.write(Tone.sine(WHITE_HZ, SYNC_SEP_MS))
 
             // Y 分量：这一行的亮度，88ms
-            appendScan(out, y0, Y_ODD_SCAN_MS)
+            appendScan(out, y0, Y_ODD_SCAN_MS, phase)
 
             if (line % 2 == 0) {
                 // 偶数行：R-Y（色度红差）44ms
                 out.write(Tone.sine(BLACK_HZ, SYNC_PULSE_MS))
                 out.write(Tone.sine(WHITE_HZ, SYNC_SEP_MS))
-                appendScan(out, lineChroma(pixels, width, height, line, chromaR = true), R_Y_EVEN_SCAN_MS)
+                appendScan(out, lineChroma(pixels, width, height, line, chromaR = true), R_Y_EVEN_SCAN_MS, phase)
             } else {
                 // 奇数行：B-Y（色度蓝差）44ms
                 out.write(Tone.sine(BLACK_HZ, SYNC_PULSE_MS))
                 out.write(Tone.sine(WHITE_HZ, SYNC_SEP_MS))
-                appendScan(out, lineChroma(pixels, width, height, line, chromaR = false), B_Y_ODD_SCAN_MS)
+                appendScan(out, lineChroma(pixels, width, height, line, chromaR = false), B_Y_ODD_SCAN_MS, phase)
             }
         }
         return out.toByteArray()
@@ -81,16 +86,44 @@ object SstvEncoder {
     /**
      * 把一行像素的某一分量调制为 FM 音频并写入输出流。
      * 每毫秒一个频率步进，电平 0..255 线性映射到 BLACK_HZ..WHITE_HZ。
+     *
+     * 【关键】相位连续累加，不是一毫秒一段重新起头的正弦。
+     * 旧写法每毫秒调用一次 Tone.sine(hz, 1)，每次都从 sin(0) 重新开始，
+     * 相位在每个毫秒边界上跳变 → 大量咔哒声，接收端解出来是横条纹。
+     * 这里沿用同一个相位往下走，得到真正的 FM 调制波。
      */
-    private fun appendScan(out: java.io.ByteArrayOutputStream, lineData: FloatArray, durationMs: Int) {
+    private fun appendScan(
+        out: java.io.ByteArrayOutputStream,
+        lineData: FloatArray,
+        durationMs: Int,
+        phaseRef: DoubleArray   // 跨调用保持相位的容器（单元素数组）
+    ) {
+        val samplesPerMs = Tone.SAMPLE_RATE / 1000
+        var phase = phaseRef[0]
+        // 整行共用一个缓冲：按毫秒切片写入，避免每毫秒 new 一个小数组
+        val buf = ByteArray(durationMs * samplesPerMs * 2)
+
         for (ms in 0 until durationMs) {
             // 这一笔毫秒对应的像素位置：durationMs 比 WIDTH 短时按比例抽样
             val idx = (ms * (lineData.size - 1) / durationMs.coerceAtLeast(1))
                 .coerceIn(0, lineData.size - 1)
             val level = lineData[idx].coerceIn(0f, 255f)
             val hz = BLACK_HZ + (WHITE_HZ - BLACK_HZ) * level / 255f
-            out.write(Tone.sine(hz.toInt(), 1))
+            val step = 2.0 * Math.PI * hz / Tone.SAMPLE_RATE
+
+            val base = ms * samplesPerMs * 2
+            for (i in 0 until samplesPerMs) {
+                val sample = (Math.sin(phase) * SCAN_AMPLITUDE * Short.MAX_VALUE).toInt()
+                    .coerceIn(-32768, 32767)
+                val o = base + i * 2
+                buf[o] = (sample and 0xFF).toByte()
+                buf[o + 1] = ((sample shr 8) and 0xFF).toByte()
+                phase += step
+            }
         }
+
+        out.write(buf)
+        phaseRef[0] = phase
     }
 
     private fun writeVisHeader(out: java.io.ByteArrayOutputStream) {

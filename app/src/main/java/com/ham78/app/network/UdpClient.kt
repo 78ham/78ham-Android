@@ -26,6 +26,9 @@ class UdpClient {
         private const val INITIAL_RECONNECT_DELAY_MS = 1000L
         private const val MAX_RECONNECT_DELAY_MS = 16000L
         private const val RECEIVE_TIMEOUT_MS = 5000
+
+        /** 退避重连全失败后的低频探测间隔：Doze 里省电，回前台最多 1 分钟自动恢复 */
+        private const val SLOW_PROBE_INTERVAL_MS = 60_000L
     }
 
     private var socket: DatagramSocket? = null
@@ -48,6 +51,10 @@ class UdpClient {
     private var callsign: String = ""
     private var ssid: Int = 179
     private var devModel: Int = 101
+
+    // 语音包 16bit 序号：逐包递增，服务器靠它识别一段连续的语音流（TALK 会话）。
+    // 之前恒 0，接收端（小程序/桌面）和部分服务器把整段语音当成无效流丢弃。
+    private var voicePacketCount = 0
 
     private var lastPacketTime = 0L
     private var reconnectAttempts = 0
@@ -167,7 +174,9 @@ class UdpClient {
             return
         }
         val type = if (isOpus) Nrl21Protocol.TYPE_OPUS else Nrl21Protocol.TYPE_VOICE
-        val packet = Nrl21Protocol.createPacket(type, callsign, ssid, devModel, dmrId, audioData)
+        val count = voicePacketCount
+        voicePacketCount = (voicePacketCount + 1) and 0xFFFF   // 16bit 回绕
+        val packet = Nrl21Protocol.createPacket(type, callsign, ssid, devModel, dmrId, audioData, count)
         if (!sendPacket(packet)) {
             warnThrottled("sendAudioData: sendPacket failed, size=${packet.size}")
         }
@@ -267,9 +276,21 @@ class UdpClient {
             delay(backoff)
             reconnect()
         } else {
-            Log.e(TAG, "Max reconnect attempts reached")
-            _connectionState.value = ConnectionState.DISCONNECTED
-            disconnect()
+            // 5 次退避重连全部失败（Doze 期间常见）：不再标记 DISCONNECTED 下线，
+            // 转入低频探测——每 60 秒试一次重建 socket，网络恢复（回前台/Wi-Fi 唤醒）
+            // 后最多 60 秒内自动回到在线。原逻辑直接 disconnect()，掉后台超过几分钟
+            // 就永远离线，必须手动重开 app。
+            Log.w(TAG, "Max reconnect attempts reached, entering slow keepalive probing")
+            _connectionState.value = ConnectionState.RECONNECTING
+            while (isRunning.get() && clientScope.isActive) {
+                delay(SLOW_PROBE_INTERVAL_MS)
+                if (!isRunning.get() || !clientScope.isActive) break
+                Log.d(TAG, "Slow keepalive probe")
+                if (connect(serverHost, serverPort, dmrId, callsign, ssid, devModel)) {
+                    Log.d(TAG, "Reconnected via slow probe")
+                    return
+                }
+            }
         }
     }
 

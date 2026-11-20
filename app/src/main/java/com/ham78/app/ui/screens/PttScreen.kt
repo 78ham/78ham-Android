@@ -180,7 +180,10 @@ fun PttScreen(
                             Text(
                                 text = if (conn.currentRoomId > 0)
                                     conn.currentGroupName.ifEmpty { "频道 ${conn.currentRoomId}" }
-                                else "未加入频道",
+                                else
+                                // 0 号频道是公共大厅：心跳自动落进去，不是"未加入"
+                                    if (conn.isOnline) "公共大厅"
+                                    else "未连接",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary,
@@ -194,6 +197,15 @@ fun PttScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            // 在线设备数：服务器 5 秒轮询带回，之前一直没展示（"不显示设备"）
+                            if (conn.isOnline && conn.onlineCount > 0) {
+                                Text(
+                                    text = "在线设备 ${conn.onlineCount}",
+                                    fontSize = 12.sp,
+                                    color = ServerOnline,
+                                    maxLines = 1
+                                )
+                            }
                         }
                         when {
                             isTransmitting -> StatusBadge("TX", PttTransmitting, showWave = true)
@@ -520,6 +532,9 @@ fun MessageBubble(
 
 /**
  * 语音跳动声波波形小组件
+ *
+ * 静止态绝不创建 rememberInfiniteTransition：消息列表可能有几百条语音气泡，
+ * 每条挂一个无限动画时钟会让整个列表每帧重组（UI 卡顿的主因）。
  */
 @Composable
 fun VoiceWaveformBars(
@@ -527,6 +542,26 @@ fun VoiceWaveformBars(
     color: Color,
     modifier: Modifier = Modifier
 ) {
+    if (!isPlaying) {
+        // 静止波形：直接画三根固定高度的小条，零动画开销
+        Row(
+            modifier = modifier.height(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            listOf(5f, 9f, 6f).forEach { h ->
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(h.dp)
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(color.copy(alpha = 0.4f))
+                )
+            }
+        }
+        return
+    }
+
     val transition = rememberInfiniteTransition(label = "voiceWave")
     val h1 by transition.animateFloat(
         initialValue = 4f,
@@ -561,14 +596,13 @@ fun VoiceWaveformBars(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val bars = if (isPlaying) listOf(h1, h2, h3) else listOf(5f, 9f, 6f)
-        bars.forEach { h ->
+        listOf(h1, h2, h3).forEach { h ->
             Box(
                 modifier = Modifier
                     .width(3.dp)
                     .height(h.dp)
                     .clip(RoundedCornerShape(1.5.dp))
-                    .background(color.copy(alpha = if (isPlaying) 0.9f else 0.4f))
+                    .background(color.copy(alpha = 0.9f))
             )
         }
     }

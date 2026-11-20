@@ -44,6 +44,9 @@ class AudioPlayer(private val context: Context) {
 
         /** 预缓冲期间的等待间隔：够短保证低延迟，又不至于空转烧 CPU */
         private const val PRIMING_POLL_MS = 5L
+
+        /** 回放 AudioTrack 单次写入块：320ms 数据，写入次数少、播放平滑 */
+        private const val REPLAY_CHUNK_BYTES = SAMPLE_RATE / 1000 * 320 * 2
     }
 
     private var audioTrack: AudioTrack? = null
@@ -52,6 +55,12 @@ class AudioPlayer(private val context: Context) {
     // 播放器初始化加锁：网络线程可能同时送来多帧，
     // 不加锁会重复创建 AudioTrack（旧的泄漏）并把队列里的数据清掉
     private val initLock = Any()
+
+    // 语音回放专用 AudioTrack：与实时流完全隔离，
+    // 之前回放和实时收音共用一个队列互相灌包——回放时实时语音消失，
+    // 实时语音会把正在回放的片段打断（"回放异常"的根因）
+    private var replayTrack: AudioTrack? = null
+    private var replayThread: Thread? = null
 
     private val isPlaying = AtomicBoolean(false)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -62,7 +71,6 @@ class AudioPlayer(private val context: Context) {
     @Volatile
     private var gainMultiplier = 1.0f
 
-    private var replayJob: Job? = null
     private val _currentPlayingClipId = MutableStateFlow<String?>(null)
     val currentPlayingClipId: StateFlow<String?> = _currentPlayingClipId.asStateFlow()
 
@@ -147,8 +155,6 @@ class AudioPlayer(private val context: Context) {
             isPlaying.set(false)
             playJob?.cancel()
             playJob = null
-            replayJob?.cancel()
-            replayJob = null
             _currentPlayingClipId.value = null
         } catch (e: Exception) {
             Log.e(TAG, "Pause playback error", e)
@@ -176,9 +182,7 @@ class AudioPlayer(private val context: Context) {
         isPlaying.set(false)
         playJob?.cancel()
         playJob = null
-        replayJob?.cancel()
-        replayJob = null
-        _currentPlayingClipId.value = null
+        stopReplayTrack()
 
         try {
             audioTrack?.apply {
@@ -211,51 +215,107 @@ class AudioPlayer(private val context: Context) {
     /**
      * 回放一段完整的 PCM 语音片段（语音回放）。
      *
-     * 复用现有的播放队列与单一写线程（playbackLoop），按帧投递并在队列接近满时
-     * 等待消费，避免覆盖 MAX_QUEUE_SIZE 上限导致片段被截断，也避免多线程同时写
-     * AudioTrack。
+     * 用独立的 AudioTrack 线程同步播放，与实时接收流的队列完全隔离：
+     * 回放不会挤掉实时语音，实时语音也不会打断回放。
+     * 点击正在播放的同一条语音 = 停止回放。
      */
     fun playClip(pcm: ByteArray, clipId: String = "") {
         if (pcm.isEmpty()) return
 
-        // 如果用户点击了正在播放的同一条语音，则执行暂停/停止切换
+        // 如果用户点击了正在播放的同一条语音，则执行停止
         if (clipId.isNotEmpty() && _currentPlayingClipId.value == clipId) {
             stopClip()
             return
         }
 
-        replayJob?.cancel()
-        replayJob = scope.launch {
-            if (!ensurePlayerReady()) return@launch
-            _currentPlayingClipId.value = clipId.ifEmpty { null }
-            try {
-                var offset = 0
-                while (offset < pcm.size && isPlaying.get()) {
-                    while (audioQueue.size >= MAX_QUEUE_SIZE - 2 && isPlaying.get()) {
-                        delay(10)
-                    }
-                    val end = minOf(offset + BYTES_PER_FRAME, pcm.size)
-                    audioQueue.offer(pcm.copyOfRange(offset, end))
-                    offset = end
-                }
+        stopReplayTrack()   // 换片段前先停掉上一个，避免两条回放叠音
 
-                // 投递完成后，等待队列中的数据被消费完毕，再把状态切回空闲
-                while (audioQueue.isNotEmpty() && isPlaying.get()) {
-                    delay(20)
+        val track = try {
+            buildTrack()
+        } catch (e: Exception) {
+            Log.e(TAG, "Replay track create failed", e)
+            null
+        } ?: return
+
+        replayTrack = track
+        val playingId = clipId.ifEmpty { "replay" }
+        _currentPlayingClipId.value = playingId
+
+        replayThread = Thread({
+            try {
+                track.play()
+                var offset = 0
+                while (offset < pcm.size && replayTrack === track) {
+                    val end = minOf(offset + REPLAY_CHUNK_BYTES, pcm.size)
+                    val written = track.write(pcm, offset, end - offset)
+                    if (written <= 0) break   // track 释放/错误
+                    offset += written
                 }
+                // 写完等播完（缓冲最长约 100ms），再释放
+                val tailMs = track.bufferSizeInFrames * 1000L / SAMPLE_RATE
+                try { Thread.sleep(tailMs.coerceAtMost(150)) } catch (_: InterruptedException) {}
+            } catch (e: Exception) {
+                Log.e(TAG, "Replay playback error", e)
             } finally {
-                if (_currentPlayingClipId.value == clipId) {
-                    _currentPlayingClipId.value = null
+                try { track.stop() } catch (_: Exception) {}
+                try { track.release() } catch (_: Exception) {}
+                if (replayTrack === track) {
+                    replayTrack = null
+                    replayThread = null
+                    if (_currentPlayingClipId.value == playingId) {
+                        _currentPlayingClipId.value = null
+                    }
                 }
             }
+        }, "VoiceReplay").apply {
+            priority = Thread.NORM_PRIORITY + 2
+            start()
         }
     }
 
-    fun stopClip() {
-        replayJob?.cancel()
-        replayJob = null
-        audioQueue.clear()
+    /** 构建一个 8kHz 单声道 AudioTrack（回放专用） */
+    private fun buildTrack(): AudioTrack {
+        val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+            .coerceAtLeast(SAMPLE_RATE / 10 * 2)   // 至少 100ms，回放不怕延迟大
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(SAMPLE_RATE)
+                    .setEncoding(AUDIO_FORMAT)
+                    .setChannelMask(CHANNEL_CONFIG)
+                    .build()
+            )
+            .setBufferSizeInBytes(bufferSize)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        if (track.state != AudioTrack.STATE_INITIALIZED) {
+            track.release()
+            throw IllegalStateException("Replay AudioTrack not initialized")
+        }
+        return track
+    }
+
+    /** 停止并释放回放 AudioTrack 与线程 */
+    private fun stopReplayTrack() {
+        val thread = replayThread
+        replayThread = null
+        val track = replayTrack
+        replayTrack = null
+        // 先置空引用让写循环退出，再 join，最后兜底 stop/release
+        try { thread?.join(300) } catch (_: Exception) {}
+        try { track?.stop() } catch (_: Exception) {}
+        try { track?.release() } catch (_: Exception) {}
         _currentPlayingClipId.value = null
+    }
+
+    fun stopClip() {
+        stopReplayTrack()
     }
 
     fun setVolume(volume: Float) {
@@ -290,13 +350,15 @@ class AudioPlayer(private val context: Context) {
     }
 
     private suspend fun playbackLoop() {
-        var bufferReady = false
+        // 预缓冲只在冷启动做一次。旧写法 poll(5ms) 空手而归就把 primed 复位，
+        // 结果每播 1 帧就重新攒 4 帧（语音 20ms 一帧），实际输出约 1/5，一顿一停。
+        var primed = false
 
         while (isPlaying.get()) {
             try {
-                if (!bufferReady) {
+                if (!primed) {
                     if (audioQueue.size >= JITTER_BUFFER_FRAMES) {
-                        bufferReady = true
+                        primed = true
                     } else {
                         // 预缓冲：等队列攒够几帧再开播。
                         // 这里只能"看"不能"取"——旧代码用 poll(20ms) 等新数据，
@@ -309,17 +371,17 @@ class AudioPlayer(private val context: Context) {
                     }
                 }
 
-                val data = audioQueue.poll(5, TimeUnit.MILLISECONDS)
+                // 有界等待：语音包 20ms 一个，200ms 等不到说明真正的静默间隙，
+                // 保持 primed 不复位，下一帧来了立刻继续播（不重新攒缓冲）。
+                val data = audioQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
 
-                if (data != null && data.isNotEmpty()) {
+                if (data.isNotEmpty()) {
                     val outputData = applyGain(data)
                     audioTrack?.write(outputData, 0, outputData.size)
 
                     while (audioQueue.size > JITTER_HIGH_THRESHOLD) {
                         audioQueue.poll()
                     }
-                } else {
-                    bufferReady = false
                 }
             } catch (e: CancellationException) {
                 break

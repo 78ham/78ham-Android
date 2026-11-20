@@ -8,20 +8,21 @@ import io.github.jaredmdobson.concentus.OpusException
 
 /**
  * Opus 编解码器封装
- * 基于 Concentus 纯 Java 实现，参数与项目音频管线对齐：
- * 8kHz / 16bit / 单声道，20ms 帧（160 采样点）。
+ * 基于 Concentus 纯 Java 实现，参数与微信小程序/桌面端对齐：
+ * 16kHz / 16bit / 单声道，20ms 帧（320 采样点）。
  *
- * Opus 内部会将输入重采样至 48kHz 处理，8000Hz 为其支持的合法输入采样率。
- * 语音场景使用 VOIP 模式，窄带码率约 12kbps，远低于 G.711 的 64kbps。
+ * 【关键】Opus 必须用 16kHz（小程序 audioOpus.js 与桌面端 codec.py 都是 16000）：
+ * 8kHz 编出来的 Opus 包在它们那边解出来全是噪声，实时语音互相听不到。
+ * G.711 分支仍是 8kHz，两套采样率在 AudioManager 里按编码切换。
  */
 class OpusCodec {
 
     companion object {
         private const val TAG = "OpusCodec"
-        private const val SAMPLE_RATE = AudioRecorder.SAMPLE_RATE // 8000
+        const val SAMPLE_RATE = 16000
         private const val CHANNELS = 1
-        private const val FRAME_SAMPLES = AudioRecorder.SAMPLES_PER_FRAME // 160 (20ms)
-        private const val BITRATE_BPS = 12000
+        const val FRAME_SAMPLES = SAMPLE_RATE * AudioRecorder.FRAME_MS / 1000 // 320 (20ms)
+        const val BITRATE_BPS = 40000 // 与小程序 OPUS_BITRATE 一致的宽带码率
         private const val COMPLEXITY = 5 // 移动端取中等复杂度，降低 CPU 占用
         private const val MAX_PACKET_BYTES = 1275 // Opus 单包上限
     }
@@ -41,7 +42,7 @@ class OpusCodec {
     private val decodeLock = Any()
 
     /**
-     * 将一帧 PCM（小端 16bit，320 字节 = 20ms）编码为 Opus 包。
+     * 将一帧 PCM（16kHz 下 640 字节 = 20ms）编码为 Opus 包。
      * 输入不足一帧时末尾补零对齐。采用直接位移转换，零 ByteBuffer 分配。
      */
     fun encode(pcmBytes: ByteArray): ByteArray {

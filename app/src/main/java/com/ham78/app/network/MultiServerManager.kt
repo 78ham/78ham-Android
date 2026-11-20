@@ -21,6 +21,9 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         private const val TAG = "MultiServerManager"
         private const val VOICE_SESSION_GAP_MS = 1200L
         private const val REFRESH_INTERVAL_MS = 5000L
+
+        /** 同一发送者位置包入库的最小间隔（毫秒）：防止坐标刷屏 */
+        private const val LOC_THROTTLE_MS = 60_000L
         private val timestampFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
     }
 
@@ -471,6 +474,12 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         // 最后一个语音包时间戳；0 表示无进行中的会话
         val lastVoicePacketTime = java.util.concurrent.atomic.AtomicLong(0)
 
+        // [loc] 位置包节流：桌面端等客户端按固定周期广播坐标，逐条入库会刷屏。
+        // 同一发送者 60 秒内只记一条（小程序对 loc 直接丢弃，这里保留低频展示）。
+        var lastLocCallSign = ""
+        var lastLocSsid = -1
+        var lastLocAt = 0L
+
         fun flushVoiceSession() {
             if (sessionCallsign.isEmpty()) return
             val callsign = sessionCallsign
@@ -538,6 +547,30 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                     }
                     Nrl21Protocol.TYPE_TEXT -> {
                         val textContent = Nrl21Protocol.TextContent.parse(packet.data)
+
+                        // 位置包：按发送者节流入库，避免坐标刷屏
+                        if (textContent.subType == "loc") {
+                            val now = System.currentTimeMillis()
+                            synchronized(voiceLock) {
+                                if (packet.callSign != lastLocCallSign ||
+                                    packet.ssid != lastLocSsid ||
+                                    now - lastLocAt > LOC_THROTTLE_MS
+                                ) {
+                                    lastLocCallSign = packet.callSign
+                                    lastLocSsid = packet.ssid
+                                    lastLocAt = now
+                                    val timestamp = synchronized(timestampFormat) {
+                                        timestampFormat.format(java.util.Date())
+                                    }
+                                    onTextMessageReceived?.invoke(
+                                        serverId, packet.callSign, packet.ssid,
+                                        "[loc]${textContent.body}", timestamp
+                                    )
+                                }
+                            }
+                            return
+                        }
+
                         val timestamp = synchronized(timestampFormat) {
                             timestampFormat.format(java.util.Date())
                         }

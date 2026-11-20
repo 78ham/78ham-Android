@@ -20,11 +20,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.sqrt
 
 /**
  * 音频录音器
- * 使用 AudioRecord 实时录制麦克风音频并进行噪声门检测
+ * 使用 AudioRecord 实时录制麦克风音频并按 20ms 帧切分回调
  */
 class AudioRecorder(private val context: Context) {
 
@@ -38,12 +37,16 @@ class AudioRecorder(private val context: Context) {
         const val SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS / 1000
         const val BYTES_PER_FRAME = SAMPLES_PER_FRAME * 2
 
-        private const val NOISE_GATE_THRESHOLD = 300
-        private const val NOISE_GATE_HANGOVER_MS = 200
+        /**
+         * AudioRecord 单次 read 的块大小：读 4 帧再逐帧切开回调。
+         * 之前按单帧读，部分设备驱动返回的块大于请求值时，
+         * 调用方只取前 320 字节、其余整块丢弃 → 实时语音每秒丢一半以上的帧。
+         */
+        private const val READ_FRAMES = 4
 
         private fun getBufferSize(): Int {
             return AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-                .coerceAtLeast(BYTES_PER_FRAME * 5)
+                .coerceAtLeast(BYTES_PER_FRAME * READ_FRAMES * 2)
         }
     }
 
@@ -52,8 +55,6 @@ class AudioRecorder(private val context: Context) {
     private val isRecording = AtomicBoolean(false)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var recordJob: Job? = null
-    private var silenceFrames = 0
-    private val hangoverFrames = NOISE_GATE_HANGOVER_MS / FRAME_MS
 
     private val _isRecordingState = MutableStateFlow(false)
     val isRecordingState: StateFlow<Boolean> = _isRecordingState.asStateFlow()
@@ -129,38 +130,24 @@ class AudioRecorder(private val context: Context) {
     }
 
     private suspend fun recordingLoop() {
-        val buffer = ByteArray(BYTES_PER_FRAME)
-        silenceFrames = 0
+        // 一次读 4 帧，然后逐帧 20ms 切开回调：
+        // read 返回的字节数可能多于请求值（驱动差异），必须把整块都发出去，
+        // 任何截断都是丢语音。不加噪声门——微信小程序/桌面端都没有，
+        // 小声说话被 RMS 阈值整帧吞掉比环境噪音更伤对讲。
+        val block = ByteArray(BYTES_PER_FRAME * READ_FRAMES)
+        val frame = ByteArray(BYTES_PER_FRAME)
 
         audioRecord?.startRecording()
 
         while (isRecording.get()) {
             try {
-                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                val read = audioRecord?.read(block, 0, block.size) ?: 0
 
-                if (read > 0) {
-                    val sampleCount = read / 2
-                    var sum = 0L
-                    for (i in 0 until sampleCount) {
-                        val lo = buffer[i * 2].toInt() and 0xFF
-                        val hi = buffer[i * 2 + 1].toInt()
-                        val s = ((hi shl 8) or lo).toShort().toLong()
-                        sum += s * s
-                    }
-                    val rms = if (sampleCount > 0) {
-                        sqrt(sum.toDouble() / sampleCount).toInt()
-                    } else 0
-
-                    if (rms >= NOISE_GATE_THRESHOLD) {
-                        silenceFrames = 0
-                        // 仅在超过噪声门时分配有效帧拷贝，静音期零分配
-                        audioDataListener?.onAudioData(buffer.copyOf(read))
-                    } else {
-                        silenceFrames++
-                        if (silenceFrames <= hangoverFrames) {
-                            audioDataListener?.onAudioData(buffer.copyOf(read))
-                        }
-                    }
+                var offset = 0
+                while (offset + BYTES_PER_FRAME <= read) {
+                    System.arraycopy(block, offset, frame, 0, BYTES_PER_FRAME)
+                    audioDataListener?.onAudioData(frame.copyOf(BYTES_PER_FRAME))
+                    offset += BYTES_PER_FRAME
                 }
             } catch (e: CancellationException) {
                 break

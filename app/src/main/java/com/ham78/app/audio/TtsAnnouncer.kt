@@ -36,8 +36,15 @@ class TtsAnnouncer(private val context: Context) {
         tts = TextToSpeech(context.applicationContext) { status ->
             initStatus = status
             if (status == TextToSpeech.SUCCESS) {
-                // 中文优先，中文 TTS 缺失时 TTS 自动回落到默认语言
-                tts?.language = Locale.SIMPLIFIED_CHINESE
+                // 中文优先；很多引擎没有中文语音包，setLanguage 返回值非
+                // LANG_MISSING_DATA/NOT_SUPPORTED 时保持引擎默认语言，
+                // 之前不检查返回值，有的引擎被设成空语言后合成直接失败
+                val result = tts?.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                if (result == TextToSpeech.LANG_MISSING_DATA ||
+                    result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    Log.w(TAG, "Chinese TTS unavailable (result=$result), using engine default")
+                    tts?.language = Locale.getDefault()
+                }
             }
         }
     }
@@ -77,21 +84,34 @@ class TtsAnnouncer(private val context: Context) {
             val done = kotlinx.coroutines.withTimeoutOrNull(SYNTH_TIMEOUT_MS) {
                 kotlinx.coroutines.suspendCancellableCoroutine { cont ->
                     val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+                    // 取消防护：withTimeoutOrNull 超时会取消协程，TTS 回调线程稍后
+                    // 触发 onDone/onError 时再 cont.resume 会抛 IllegalStateException
+                    // 并在 binder 线程里炸掉整个 TTS 客户端（"播报合成失败"的元凶之一）。
+                    cont.invokeOnCancellation { finished.set(true) }
+
                     // UtteranceProgressListener 的三个方法都是抽象的，必须全部实现，
                     // 少一个就编译不过（onStop 是 API 23 引入的，本项目 minSdk 23 正好可用）
                     val listener = object : android.speech.tts.UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) = Unit
                         override fun onDone(utteranceId: String?) {
-                            if (finished.compareAndSet(false, true)) cont.resume(true)
+                            if (finished.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(true)
+                            }
                         }
                         override fun onError(utteranceId: String?, errorCode: Int) {
-                            if (finished.compareAndSet(false, true)) cont.resume(false)
+                            if (finished.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(false)
+                            }
                         }
                         override fun onError(utteranceId: String?) {
-                            if (finished.compareAndSet(false, true)) cont.resume(false)
+                            if (finished.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(false)
+                            }
                         }
                         override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                            if (finished.compareAndSet(false, true)) cont.resume(false)
+                            if (finished.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(false)
+                            }
                         }
                     }
                     progressListener = listener
@@ -99,7 +119,9 @@ class TtsAnnouncer(private val context: Context) {
 
                     val result = tts?.synthesizeToFile(clipText, null, wavFile, "78ham_tts")
                     if (result != TextToSpeech.SUCCESS) {
-                        if (finished.compareAndSet(false, true)) cont.resume(false)
+                        if (finished.compareAndSet(false, true) && cont.isActive) {
+                            cont.resume(false)
+                        }
                     }
                 }
             }
@@ -149,6 +171,7 @@ class TtsAnnouncer(private val context: Context) {
 
     fun release() {
         tts?.stop()
+        tts?.setOnUtteranceProgressListener(null)
         tts?.shutdown()
         tts = null
     }

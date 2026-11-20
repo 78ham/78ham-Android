@@ -96,13 +96,15 @@ object Nrl21Protocol {
         ssid: Int = DEFAULT_SSID,
         devModel: Int = DEFAULT_DEVMODEL,
         dmrId: Int = 0,
-        audioData: ByteArray? = null
+        audioData: ByteArray? = null,
+        count: Int = 0
     ): ByteArray {
-        return createPacket(TYPE_VOICE, callSign, ssid, devModel, dmrId, audioData)
+        return createPacket(TYPE_VOICE, callSign, ssid, devModel, dmrId, audioData, count)
     }
 
     /**
      * 创建心跳包
+     * 心跳 count 固定为 1（与桌面端 PacketFactory 一致）
      */
     fun createHeartbeatPacket(
         callSign: String,
@@ -110,7 +112,7 @@ object Nrl21Protocol {
         devModel: Int = DEFAULT_DEVMODEL,
         dmrId: Int = 0
     ): ByteArray {
-        return createPacket(TYPE_HEARTBEAT, callSign, ssid, devModel, dmrId, null)
+        return createPacket(TYPE_HEARTBEAT, callSign, ssid, devModel, dmrId, null, count = 1)
     }
 
     /**
@@ -146,6 +148,9 @@ object Nrl21Protocol {
 
     /**
      * 通用包创建方法（零额外包装对象，直接构建原生字节数组）
+     *
+     * count 是 16bit 序号：语音包必须逐包递增（微信小程序/桌面端都这么做），
+     * 恒 0 的包会被部分服务器判定为无效语音流，导致 TALK 会话不开、实时语音无声。
      */
     fun createPacket(
         type: Int,
@@ -153,7 +158,8 @@ object Nrl21Protocol {
         ssid: Int = DEFAULT_SSID,
         devModel: Int = DEFAULT_DEVMODEL,
         dmrId: Int = 0,
-        data: ByteArray? = null
+        data: ByteArray? = null,
+        count: Int = 0
     ): ByteArray {
         val dataSize = data?.size ?: 0
         val totalLength = FIXED_BUFFER_SIZE + dataSize
@@ -177,8 +183,8 @@ object Nrl21Protocol {
         // type / status / count
         packet[OFF_TYPE] = type.toByte()
         packet[OFF_STATUS] = 1
-        packet[OFF_COUNT] = 0
-        packet[OFF_COUNT + 1] = 0
+        packet[OFF_COUNT] = ((count shr 8) and 0xFF).toByte()
+        packet[OFF_COUNT + 1] = (count and 0xFF).toByte()
 
         // callSign (6字节)
         val csLen = minOf(callSign.length, CALLSIGN_LEN)

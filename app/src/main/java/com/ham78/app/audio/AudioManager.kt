@@ -38,6 +38,10 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
     @Volatile
     private var codec = AudioCodec.G711
 
+    /** 发射路径上残留的不足一帧的 PCM（Opus 帧比录音帧大，需要攒两帧再发） */
+    private val frameCarry = java.io.ByteArrayOutputStream()
+    private val frameCarryLock = Any()
+
     private val _isTransmitting = MutableStateFlow(false)
     val isTransmitting: StateFlow<Boolean> = _isTransmitting.asStateFlow()
 
@@ -58,20 +62,23 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
     private val recordListener = object : AudioRecorder.AudioDataListener {
         override fun onAudioData(pcmData: ByteArray) {
             if (!_isTransmitting.value) return
-            if (pcmData.size >= AudioRecorder.BYTES_PER_FRAME) {
-                // 长度恰好为一帧时直接使用，避免每帧一次数组拷贝
-                val frameData = if (pcmData.size == AudioRecorder.BYTES_PER_FRAME) {
-                    pcmData
-                } else {
-                    pcmData.copyOf(AudioRecorder.BYTES_PER_FRAME)
-                }
+            if (pcmData.isEmpty()) return
 
-                val encodedData = when (codec) {
-                    AudioCodec.G711 -> g711Codec.encodePcmToAlaw(frameData)
-                    AudioCodec.OPUS -> opusCodec.encode(frameData)
+            // 录音固定 20ms/320B（8kHz），Opus 帧 20ms/640B（16kHz）：
+            // 攒够一个完整编码帧才编码发送，剩余零头留给下一块
+            synchronized(frameCarryLock) {
+                frameCarry.write(pcmData, 0, pcmData.size)
+                val buf = frameCarry.toByteArray()
+                val frameBytes = currentEncodeFrameBytes()
+                var offset = 0
+                while (offset + frameBytes <= buf.size) {
+                    sendEncodedFrame(buf, offset, frameBytes)
+                    offset += frameBytes
                 }
-
-                udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
+                frameCarry.reset()
+                if (offset < buf.size) {
+                    frameCarry.write(buf, offset, buf.size - offset)
+                }
             }
         }
 
@@ -81,12 +88,35 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
         }
     }
 
+    /** 当前编码一帧需要的 PCM 字节数（G711=320@8k，Opus=640@16k） */
+    private fun currentEncodeFrameBytes(): Int = when (codec) {
+        AudioCodec.G711 -> AudioRecorder.BYTES_PER_FRAME
+        AudioCodec.OPUS -> OpusCodec.FRAME_SAMPLES * 2
+    }
+
+    /** 编码并发送一个整帧 PCM */
+    private fun sendEncodedFrame(buf: ByteArray, offset: Int, frameBytes: Int) {
+        val frameData = if (offset == 0 && buf.size == frameBytes) {
+            buf
+        } else {
+            buf.copyOfRange(offset, offset + frameBytes)
+        }
+        val encodedData = when (codec) {
+            AudioCodec.G711 -> g711Codec.encodePcmToAlaw(frameData)
+            AudioCodec.OPUS -> opusCodec.encode(frameData)
+        }
+        udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
+    }
+
     init {
         recorder.audioDataListener = recordListener
     }
 
     fun setCodec(newCodec: AudioCodec) {
+        if (codec == newCodec) return
         codec = newCodec
+        // 帧长变了（320↔640），发射残留的零头按新编码也没法拼帧，直接丢掉
+        synchronized(frameCarryLock) { frameCarry.reset() }
     }
 
     fun setVolume(volume: Int) {
@@ -133,21 +163,25 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
 
     /**
      * 直接发送一段已生成的 PCM 信号（信号音/CW/DTMF/SSTV/尾音/TTS/录音回放）。
+     * 信号源一律是 8kHz PCM；G.711 直接切帧编码，Opus 先重采样到 16kHz 再编码。
      *
      * 与语音发射互斥：PTT 正在按住时拒绝信号发送，避免两路音频叠加。
-     * 按 20ms 一帧切片，每帧独立编码发送，与麦克风路径走完全相同的链路。
      *
      * 【关键】按真实时间节奏逐帧发，而不是一口气把整段塞进 UDP：
      * 老写法是一个 for 循环把全部帧瞬间发出，SSTV 一张图就是 2880 个 UDP 包
      * 挤在一起，服务端 socket 缓冲区直接溢出丢包，接收端听到的是断断续续的碎音。
      * 现在每帧之间按 20ms 的真实间隔等待，收发两侧的节奏才对得上。
      */
-    suspend fun transmitPcm(pcm: ByteArray): Boolean {
+    suspend fun transmitPcm(pcm8k: ByteArray): Boolean {
         if (_isTransmitting.value) return false
+
+        // Opus 需要 16kHz 帧：整段重采样一次（信号音都不是实时流，一次性处理没问题）
+        val pcm = if (codec == AudioCodec.OPUS) resample8kTo16k(pcm8k) else pcm8k
+        val frameBytes = currentEncodeFrameBytes()
 
         var offset = 0
         var frameIndex = 0
-        val totalFrames = (pcm.size + AudioRecorder.BYTES_PER_FRAME - 1) / AudioRecorder.BYTES_PER_FRAME
+        val totalFrames = (pcm.size + frameBytes - 1) / frameBytes
         val startedAt = System.nanoTime()
 
         while (offset < pcm.size) {
@@ -156,22 +190,23 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
             val dueAt = startedAt + frameIndex * AudioRecorder.FRAME_MS * 1_000_000L
             val waitNs = dueAt - System.nanoTime()
             if (waitNs > 0) {
-                delay(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
+                kotlinx.coroutines.delay(waitNs)
             }
 
-            val end = minOf(offset + AudioRecorder.BYTES_PER_FRAME, pcm.size)
-            val frameData = if (end - offset == AudioRecorder.BYTES_PER_FRAME) {
-                pcm.copyOfRange(offset, end)   // 整帧
-            } else {
-                // 最后一帧不足 20ms：补零对齐，保证编码器拿到完整帧
-                val padded = ByteArray(AudioRecorder.BYTES_PER_FRAME)
-                System.arraycopy(pcm, offset, padded, 0, end - offset)
-                padded
-            }
-
+            val end = minOf(offset + frameBytes, pcm.size)
             val encodedData = when (codec) {
-                AudioCodec.G711 -> g711Codec.encodePcmToAlaw(frameData)
-                AudioCodec.OPUS -> opusCodec.encode(frameData)
+                AudioCodec.G711 -> {
+                    // 最后一帧不足 20ms：补零对齐，保证编码器拿到完整帧
+                    val frameData = if (end - offset == frameBytes) {
+                        pcm.copyOfRange(offset, end)
+                    } else {
+                        val padded = ByteArray(frameBytes)
+                        System.arraycopy(pcm, offset, padded, 0, end - offset)
+                        padded
+                    }
+                    g711Codec.encodePcmToAlaw(frameData)
+                }
+                AudioCodec.OPUS -> opusCodec.encode(pcm.copyOfRange(offset, end))   // 内部补零对齐
             }
             udpClient.sendAudioData(encodedData, codec == AudioCodec.OPUS)
 
@@ -181,6 +216,29 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
 
         Log.d(TAG, "Signal transmitted: $totalFrames frames (${pcm.size} bytes)")
         return true
+    }
+
+    /**
+     * 8kHz → 16kHz 线性插值重采样（发射 Opus 信号用）。
+     * 信号源（CW/DTMF/尾音/TTS）都是 8kHz 生成的。
+     */
+    private fun resample8kTo16k(src: ByteArray): ByteArray {
+        val sampleCount = src.size / 2
+        if (sampleCount == 0) return ByteArray(0)
+        val out = ByteArray(sampleCount * 4)   // 2x 采样数 * 2 字节
+        for (i in 0 until sampleCount) {
+            val s = ((src[i * 2 + 1].toInt() shl 8) or (src[i * 2].toInt() and 0xFF)).toShort().toInt()
+            // 每个输入样本产出两个输出样本：第一个原样，第二个取相邻样本的均值
+            out[i * 4] = (s and 0xFF).toByte()
+            out[i * 4 + 1] = ((s shr 8) and 0xFF).toByte()
+            val next = if (i + 1 < sampleCount) {
+                ((src[(i + 1) * 2 + 1].toInt() shl 8) or (src[(i + 1) * 2].toInt() and 0xFF)).toShort().toInt()
+            } else s
+            val avg = (s + next) / 2
+            out[i * 4 + 2] = (avg and 0xFF).toByte()
+            out[i * 4 + 3] = ((avg shr 8) and 0xFF).toByte()
+        }
+        return out
     }
 
     /**
@@ -217,14 +275,28 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
 
     /**
      * 将一帧网络语音数据解码为 PCM（8kHz/16bit/单声道小端）。
+     * Opus 网络包是 16kHz 编码的（与小程序/桌面端一致），解码后降采样到 8kHz，
+     * 与 G.711 分支共用同一套 8kHz 播放器/回放缓存。
      * 用于语音回放时缓存会话音频，不依赖是否为活跃服务器。
      */
     fun decodeToPcm(data: ByteArray, type: Int): ByteArray? {
         return when (type) {
             Nrl21Protocol.TYPE_VOICE -> g711Codec.decodeAlawToPcm(data)
-            Nrl21Protocol.TYPE_OPUS -> opusCodec.decode(data)
+            Nrl21Protocol.TYPE_OPUS -> downsample16kTo8k(opusCodec.decode(data))
             else -> null
         }
+    }
+
+    /** 16kHz → 8kHz 降采样（取第偶数个样本，Opus 解码输出每帧 320 样本 → 160） */
+    private fun downsample16kTo8k(src: ByteArray): ByteArray {
+        val sampleCount = src.size / 2
+        if (sampleCount == 0) return ByteArray(0)
+        val out = ByteArray(sampleCount / 2 * 2)
+        for (i in 0 until sampleCount / 2) {
+            out[i * 2] = src[i * 4]
+            out[i * 2 + 1] = src[i * 4 + 1]
+        }
+        return out
     }
 
     /** 回放一段已缓存的 PCM 语音（语音回放） */

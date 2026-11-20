@@ -19,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.ham78.app.HamApplication
 import com.ham78.app.service.TalkService
 import com.ham78.app.ui.theme.Background
 import com.ham78.app.ui.theme.BrandPurple
@@ -27,6 +28,9 @@ class MainActivity : ComponentActivity() {
 
     private var talkService by mutableStateOf<TalkService?>(null)
     private var serviceBound by mutableStateOf(false)
+
+    // 掉后台期间最后可见时间：回前台时用于判断 UDP 心跳是否已经断了很久
+    private var lastVisibleAt = 0L
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -51,6 +55,27 @@ class MainActivity : ComponentActivity() {
             androidx.core.content.ContextCompat.startForegroundService(this, intent)
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         }
+
+        // 对讲服务必须常驻：未在电池优化白名单时弹一次系统确认框（用户可拒绝）
+        val app = application as? HamApplication
+        if (app != null && !app.isIgnoringBatteryOptimizations()) {
+            // 延后 1 秒弹：等界面先渲染完成，避免和首帧绘制抢焦点
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                app.requestIgnoreBatteryOptimizations()
+            }, 1000)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        lastVisibleAt = System.currentTimeMillis()
+        // 回前台：多服务器 5 秒定时刷新协程一直在跑，UI 状态会自己跟上；
+        // 这里只需要把 UDP 心跳的新鲜度交给它——服务里 15 秒无包会自动重连
+    }
+
+    override fun onStop() {
+        super.onStop()
+        lastVisibleAt = System.currentTimeMillis()
     }
 
     override fun onDestroy() {

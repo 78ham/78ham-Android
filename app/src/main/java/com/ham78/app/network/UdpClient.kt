@@ -46,6 +46,7 @@ class UdpClient {
     private var heartbeatJob: Job? = null
     private var monitorJob: Job? = null
     private var reconnectJob: Job? = null
+    private var slowProbeJob: Job? = null
 
     private var dmrId: Int = 0
     private var callsign: String = ""
@@ -125,11 +126,13 @@ class UdpClient {
         heartbeatJob?.cancel()
         monitorJob?.cancel()
         reconnectJob?.cancel()
+        slowProbeJob?.cancel()
 
         receiveJob = null
         heartbeatJob = null
         monitorJob = null
         reconnectJob = null
+        slowProbeJob = null
 
         try { socket?.close() } catch (_: Exception) { }
         socket = null
@@ -282,13 +285,19 @@ class UdpClient {
             // 就永远离线，必须手动重开 app。
             Log.w(TAG, "Max reconnect attempts reached, entering slow keepalive probing")
             _connectionState.value = ConnectionState.RECONNECTING
-            while (isRunning.get() && clientScope.isActive) {
-                delay(SLOW_PROBE_INTERVAL_MS)
-                if (!isRunning.get() || !clientScope.isActive) break
-                Log.d(TAG, "Slow keepalive probe")
-                if (connect(serverHost, serverPort, dmrId, callsign, ssid, devModel)) {
-                    Log.d(TAG, "Reconnected via slow probe")
-                    return
+            // 慢速探测放独立协程：不占用 monitorJob，便于单独取消与状态可见。
+            // 生命周期：connect() 成功后本协程自行退出；disconnect()/reconnect 成功
+            // 路径也会显式 cancel（reconnect 里做），保证同一时刻只有一个探测在跑
+            slowProbeJob?.cancel()
+            slowProbeJob = clientScope.launch {
+                while (isRunning.get() && clientScope.isActive) {
+                    delay(SLOW_PROBE_INTERVAL_MS)
+                    if (!isRunning.get() || !clientScope.isActive) return@launch
+                    Log.d(TAG, "Slow keepalive probe")
+                    if (connect(serverHost, serverPort, dmrId, callsign, ssid, devModel)) {
+                        Log.d(TAG, "Reconnected via slow probe")
+                        return@launch
+                    }
                 }
             }
         }
@@ -298,6 +307,10 @@ class UdpClient {
         if (reconnectJob?.isActive == true) return
         reconnectJob = clientScope.launch {
             if (connect(serverHost, serverPort, dmrId, callsign, ssid, devModel)) {
+                // 慢探测还挂着的话立刻停：它周期性调 connect()，成功后会把
+                // 刚建好的 socket 再关一次重建，语音流直接被打断
+                slowProbeJob?.cancel()
+                slowProbeJob = null
                 Log.d(TAG, "Reconnected successfully")
             }
         }

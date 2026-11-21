@@ -36,7 +36,9 @@ data class ServerConfig(
     val port: Int = 60050,
     val username: String = "",
     val password: String = "",
-    val autoConnect: Boolean = false
+    val autoConnect: Boolean = false,
+    // OIDC 没有密码。旧配置里没有这个字段，Gson 会把它留成 null
+    val authToken: String? = null
 ) {
     val displayName: String
         get() = name.ifEmpty { host }

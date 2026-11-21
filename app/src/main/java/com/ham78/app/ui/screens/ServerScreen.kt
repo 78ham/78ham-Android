@@ -378,6 +378,8 @@ fun AddServerDialog(
     var port by remember { mutableStateOf("60050") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    // 明文 http 二次确认：null=不显示，非 null=待确认的地址
+    var pendingPlainHttp by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -425,16 +427,22 @@ fun AddServerDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    onAdd(
-                        ServerConfig(
-                            id = "${host}:${port}",
-                            name = name.ifEmpty { host },
-                            host = host,
-                            port = port.toIntOrNull() ?: 60050,
-                            username = username,
-                            password = password
+                    // 明文 http 会让密码/登录 token 明文过网，必须用户确认才放行；
+                    // 裸域名一律走 https（ApiClient.normalizeUrl 的既定行为）
+                    if (host.trim().startsWith("http://", ignoreCase = true)) {
+                        pendingPlainHttp = host.trim()
+                    } else {
+                        onAdd(
+                            ServerConfig(
+                                id = "${host}:${port}",
+                                name = name.ifEmpty { host },
+                                host = host,
+                                port = port.toIntOrNull() ?: 60050,
+                                username = username,
+                                password = password
+                            )
                         )
-                    )
+                    }
                 },
                 enabled = host.isNotEmpty() && username.isNotEmpty() && password.isNotEmpty()
             ) {
@@ -447,4 +455,36 @@ fun AddServerDialog(
             }
         }
     )
+
+    pendingPlainHttp?.let { plainHost ->
+        AlertDialog(
+            onDismissRequest = { pendingPlainHttp = null },
+            title = { Text("使用不加密连接？", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("地址 \"$plainHost\" 使用 http:// 明文连接：登录密码和通信 token 将不经加密直接在网络上传输，可能被截获。仅建议在内网或自建服务器时使用。")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    onAdd(
+                        ServerConfig(
+                            id = "${plainHost}:${port}",
+                            name = name.ifEmpty { plainHost },
+                            host = plainHost,
+                            port = port.toIntOrNull() ?: 60050,
+                            username = username,
+                            password = password
+                        )
+                    )
+                    pendingPlainHttp = null
+                }) {
+                    Text("仍要使用 http")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPlainHttp = null }) {
+                    Text("改用 https（去掉 http:// 前缀）")
+                }
+            }
+        )
+    }
 }

@@ -1,6 +1,7 @@
 package com.ham78.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +27,7 @@ import com.ham78.app.data.RogerBeepStyle
 import com.ham78.app.data.ScheduleMode
 import com.ham78.app.data.SettingsRepository
 import com.ham78.app.data.UserSettings
+import com.ham78.app.ui.UserAvatar
 import com.ham78.app.ui.theme.*
 import android.view.KeyEvent
 import android.widget.Toast
@@ -42,7 +44,15 @@ private fun appVersionName(context: android.content.Context): String = try {
  * @param onLogout 退出登录：清凭据 → 停服务 → 回登录页（由 MainApp 传入并已实现跳转）
  */
 @Composable
-fun SettingsScreen(onLogout: (() -> Unit)? = null) {
+fun SettingsScreen(
+    onLogout: (() -> Unit)? = null,
+    avatarUrl: String = "",
+    localAvatar: java.io.File? = null,
+    onChangeAvatar: (() -> Unit)? = null,
+    onOpenDevices: (() -> Unit)? = null,
+    onOpenGroup: (() -> Unit)? = null,
+    onOpenMonitor: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     val settingsRepository = remember { SettingsRepository(context) }
     val appVersionName = remember { appVersionName(context) }
@@ -69,16 +79,35 @@ fun SettingsScreen(onLogout: (() -> Unit)? = null) {
             .verticalScroll(scrollState)
             .padding(horizontal = 16.dp)
     ) {
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = "设置",
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary
-        )
-
         Spacer(modifier = Modifier.height(16.dp))
+
+        if (onChangeAvatar != null || onOpenDevices != null) {
+            SettingsSection(title = "账号") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = onChangeAvatar != null) { onChangeAvatar?.invoke() },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    UserAvatar(url = avatarUrl, localFile = localAvatar, size = 48.dp)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(settings.callsign.ifEmpty { "未登录" }, color = TextPrimary, fontWeight = FontWeight.Medium)
+                        Text("更换头像。没有头像时用默认头像", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+                if (onOpenDevices != null) {
+                    SettingsLink("我的设备", "查看设备、下发 AT 指令、改设备设置", onOpenDevices)
+                }
+                if (onOpenGroup != null) {
+                    SettingsLink("群组详情", "当前频道里的全部设备", onOpenGroup)
+                }
+                if (onOpenMonitor != null) {
+                    SettingsLink("实时监听", "看各房间谁在说话，并可单独收听", onOpenMonitor)
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
 
         // 设备信息
         SettingsSection(title = "设备信息") {
@@ -513,6 +542,19 @@ private fun scheduleFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedTextColor = TextPrimary,
     cursorColor = BrandPurple
 )
+
+@Composable
+private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp)
+    ) {
+        Text(title, color = TextPrimary, fontWeight = FontWeight.Medium)
+        Text(subtitle, color = TextSecondary, fontSize = 12.sp)
+    }
+}
 
 @Composable
 fun SettingsSection(

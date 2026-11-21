@@ -2,11 +2,15 @@ package com.ham78.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import android.view.KeyEvent
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,7 +25,7 @@ class SettingsRepository(context: Context) {
     private val gson = Gson()
 
     private val prefs: SharedPreferences by lazy {
-        val masterKey = MasterKey.Builder(context)
+        val masterKey = MasterKey.Builder(appContext)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
         EncryptedSharedPreferences.create(
@@ -34,12 +38,32 @@ class SettingsRepository(context: Context) {
     }
 
     init {
-        // 首个实例创建时加载一次；后续实例共享同一份 flow，
-        // 保证任意实例 saveSettings 后所有观察者（UI/Service）都能收到更新
+        // EncryptedSharedPreferences 创建（MasterKey 生成 + 解密）耗时可达数百 ms，
+        // 构造函数可能在主线程（LoginActivity / TalkService / BootReceiver），
+        // 所以"建 prefs + 读磁盘"全部放 IO 协程：构造立即返回，UI 先看到共享 flow 的当前值，
+        // 磁盘读完后更新 flow，观察者自动拿到真实数据。
+        // 首个实例负责异步加载；后续实例共享同一份 flow，任意实例 saveSettings
+        // 后所有观察者（UI/Service）都能收到更新。
         synchronized(SettingsRepository::class.java) {
             if (!globalFlowInitialized) {
-                _sharedSettings.value = loadSettings()
                 globalFlowInitialized = true
+                GlobalScope.launch(Dispatchers.IO) {
+                    try {
+                        val loaded = readSettingsFromDisk()
+                        // 异步读盘期间用户可能已保存过设置（读前 flow 还是默认值）：
+                        // 已被覆盖就不回写磁盘旧值，否则刚保存的设置会被"回退"
+                        synchronized(SettingsRepository::class.java) {
+                            if (_sharedSettings.value == UserSettings.DEFAULT) {
+                                _sharedSettings.value = loaded
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SettingsRepository", "Failed to read settings from disk", e)
+                    } finally {
+                        // 读失败也放行等待者（BootReceiver 自动连接等），否则永远等不到
+                        _ready.value = true
+                    }
+                }
             }
         }
     }
@@ -47,7 +71,18 @@ class SettingsRepository(context: Context) {
     private val _settings get() = _sharedSettings
     val settings: StateFlow<UserSettings> = _sharedSettings.asStateFlow()
 
-    fun loadSettings(): UserSettings {
+    /** 磁盘设置是否已读入共享 flow；主线程入口（自启/自动连接/登录跳转）据此等待 */
+    val ready: StateFlow<Boolean> = _ready.asStateFlow()
+
+    /**
+     * 读"当前已知"的设置：flow 里已有磁盘数据就用它，还没读完就用默认值。
+     * 主线程入口（BootReceiver/LoginActivity 的启动分支）用它替代直接读盘，
+     * 不阻塞；需要"确定读盘后"最新值的调用方观察 settings flow。
+     */
+    fun loadSettings(): UserSettings = _sharedSettings.value
+
+    /** 从磁盘读全部设置（含解密开销），只在 IO 线程调用；结果由 init 写进共享 flow */
+    private fun readSettingsFromDisk(): UserSettings {
         val stored = prefs
         return UserSettings(
             username = stored.getString(KEY_USERNAME, "") ?: "",
@@ -203,6 +238,7 @@ class SettingsRepository(context: Context) {
 
         // 所有 SettingsRepository 实例共享的设置流
         private val _sharedSettings = MutableStateFlow(UserSettings.DEFAULT)
+        private val _ready = MutableStateFlow(false)
         @Volatile
         private var globalFlowInitialized = false
     }

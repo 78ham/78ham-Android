@@ -32,7 +32,8 @@ class AudioManager(private val context: Context, private val udpClient: UdpClien
     private val player = AudioPlayer(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val g711Codec = G711Codec()
-    private val opusCodec = OpusCodec()
+    // 按需初始化：默认 G711 时不必做 Opus 初始化开销
+    private val opusCodec by lazy { OpusCodec() }
 
     // 设置线程写、录音/接收线程读，必须保证可见性
     @Volatile

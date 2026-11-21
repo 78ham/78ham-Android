@@ -4,6 +4,7 @@ import android.util.Log
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
@@ -87,6 +88,7 @@ object ApiClient {
                 callsign = data["callsign"] as? String ?: "",
                 dmrId = (data["dmr_id"] as? Number)?.toInt() ?: 0,
                 mdcid = data["mdcid"] as? String ?: "",
+                avatar = data["avatar"] as? String ?: "",
                 server = data["server"] as? String,
                 serverPort = (data["server_port"] as? Number)?.toInt(),
                 serverUdpPort = (data["server_udp_port"] as? Number)?.toInt()
@@ -230,6 +232,159 @@ object ApiClient {
     }
 
     /**
+     * 当前服务器是否打开了 OIDC。失败或未开启时登录页不显示按钮。
+     */
+    suspend fun getOidcConfig(serverHost: String): Result<OidcConfig> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/user/oidc/config"
+        val response = makeRequest(url, "GET")
+        val map = parseJson(response)
+        val data = if (getCode(map) == SUCCESS_CODE) {
+            map["data"] as? Map<*, *> ?: emptyMap<String, Any>()
+        } else map
+        OidcConfig(
+            enabled = data["enabled"] as? Boolean ?: false,
+            buttonName = data["button_name"] as? String ?: ""
+        )
+    }
+
+    /**
+     * 注册。执照照片走 multipart 字段 license，其余是表单字段。
+     * 成功后要等管理员审核，这里不自动登录。
+     */
+    suspend fun register(
+        serverHost: String,
+        fields: Map<String, String>,
+        license: File
+    ): Result<String> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/user/reg/create"
+        val response = makeMultipart(url, fields, "license", license)
+        val map = parseJson(response)
+        if (getCode(map) == SUCCESS_CODE) getMessage(map, "注册成功，请等待管理员审核")
+        else throw ApiException(getMessage(map, "手机号或者呼号已经存在，请直接登录试试"))
+    }
+
+    /** 把头像地址写回当前用户。没有头像时界面用默认头像。 */
+    suspend fun updateAvatar(
+        serverHost: String,
+        user: UserInfo,
+        avatar: String
+    ): Result<UserInfo> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/user/update/avatar"
+        val body = mapOf(
+            "id" to user.id,
+            "username" to user.username,
+            "callsign" to user.callsign,
+            "dmr_id" to user.dmrId,
+            "mdcid" to user.mdcid,
+            "avatar" to avatar
+        )
+        val response = makeRequest(url, "POST", body = body, serverHost = host)
+        val map = parseJson(response)
+        if (getCode(map) == SUCCESS_CODE) user.copy(avatar = avatar)
+        else throw ApiException(getMessage(map, "头像更新失败"))
+    }
+
+    /** 当前账号名下的设备。items 是 "呼号-SSID" 到设备的映射。 */
+    suspend fun getMyDevices(serverHost: String): Result<List<ManagedDevice>> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/device/mydevlist"
+        val response = makeRequest(url, "GET", serverHost = host)
+        val map = parseJson(response)
+        if (getCode(map) != SUCCESS_CODE) throw ApiException(getMessage(map, "获取设备列表失败"))
+        val data = map["data"] as? Map<*, *> ?: emptyMap<String, Any>()
+        val items = (data["items"] as? Map<*, *>) ?: data
+        items.values.mapNotNull { item ->
+            (item as? Map<*, *>)?.let { parseManagedDevice(it) }
+        }.sortedByDescending { if (it.isOnline) 1 else 0 }
+    }
+
+    suspend fun getManagedDevice(
+        serverHost: String,
+        callsign: String,
+        ssid: Int
+    ): Result<ManagedDevice> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/device/get"
+        val response = makeRequest(
+            url, "POST",
+            body = mapOf("callsign" to callsign, "ssid" to ssid),
+            serverHost = host
+        )
+        unwrapDevice(parseJson(response), "获取设备信息失败")
+    }
+
+    /**
+     * 经服务器把 AT 指令中继到设备。
+     * 服务器很快就返回，回复可能还是上一次的；调用方要再轮询 getManagedDevice。
+     * type 1 查询，2 写入。
+     */
+    suspend fun sendDeviceAt(
+        serverHost: String,
+        callsign: String,
+        ssid: Int,
+        type: Int,
+        command: String,
+        data: String
+    ): Result<ManagedDevice> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/device/at"
+        val response = makeRequest(
+            url, "POST",
+            body = mapOf(
+                "callsign" to callsign,
+                "ssid" to ssid,
+                "type" to type,
+                "atcommand" to command,
+                "data" to data
+            ),
+            serverHost = host
+        )
+        unwrapDevice(parseJson(response), "AT 指令发送失败")
+    }
+
+    /** 老设备的寄存器参数。body 是已经拼好的表单，和网页端同一条接口。 */
+    suspend fun changeDeviceParm(serverHost: String, form: String): Result<String> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/device/change"
+        val response = makeRaw(url, form, "application/x-www-form-urlencoded", host)
+        val map = parseJson(response)
+        if (getCode(map) == SUCCESS_CODE) getMessage(map, "已保存")
+        else throw ApiException(getMessage(map, "保存失败"))
+    }
+
+    suspend fun changeDevice1w(serverHost: String, parm: Map<String, Any?>): Result<String> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/device/change1w"
+        val response = makeRequest(url, "POST", body = parm, serverHost = host)
+        val map = parseJson(response)
+        if (getCode(map) == SUCCESS_CODE) getMessage(map, "1W 参数已保存")
+        else throw ApiException(getMessage(map, "保存失败"))
+    }
+
+    /** 把一台设备改到另一个群组。只提交服务器更新用得到的字段。 */
+    suspend fun moveDeviceToGroup(
+        serverHost: String,
+        device: ManagedDevice,
+        groupId: Int
+    ): Result<Boolean> = apiCall(serverHost) { host ->
+        val url = "${normalizeUrl(host)}/device/update"
+        val data = mapOf(
+            "id" to device.id,
+            "callsign" to device.callsign,
+            "ssid" to device.ssid,
+            "name" to device.name,
+            "gird" to device.grid,
+            "dmrid" to device.dmrId,
+            "dev_type" to device.devType,
+            "dev_model" to device.devModel,
+            "group_id" to groupId,
+            "status" to device.status,
+            "priority" to device.priority,
+            "chan_name" to device.chanName,
+            "rf_type" to device.rfType,
+            "note" to device.note
+        )
+        val response = makeRequest(url, "POST", body = data, serverHost = host)
+        if (getCode(parseJson(response)) == SUCCESS_CODE) true
+        else throw ApiException("切换失败，群组可能不允许加入")
+    }
+
+    /**
      * 获取服务器列表
      */
     suspend fun getServerList(): Result<List<ServerInfo>> = apiCall {
@@ -270,6 +425,11 @@ object ApiClient {
         }
     }
 
+    /**
+     * 归一化服务器地址：裸域名/裸 IP 一律按 https 处理；
+     * 只有用户在"添加服务器"或登录页显式输入 http:// 并确认后，才允许明文连接
+     * （登录响应里的 token 和密码会明文过网，仅限自建/内网服务器使用）。
+     */
     private fun normalizeUrl(host: String): String = when {
         host.startsWith("http://", ignoreCase = true) -> host
         host.startsWith("https://", ignoreCase = true) -> host
@@ -316,7 +476,8 @@ object ApiClient {
             }
 
             Log.d(TAG, "$method $url - Status: $statusCode")
-            if (response.length < 500) Log.d(TAG, "Response: $response")
+            // 只打状态码与长度，避免把含 token 的登录响应泄露到 logcat
+            if (response.length < 500) Log.d(TAG, "Response length: ${response.length}")
 
             if (statusCode !in 200..299) {
                 throw ApiException("HTTP $statusCode")
@@ -340,6 +501,128 @@ object ApiClient {
     private fun getMessage(map: Map<*, *>, default: String): String =
         map["message"] as? String ?: default
 
+    private fun unwrapDevice(map: Map<*, *>, fallback: String): ManagedDevice {
+        if (getCode(map) != SUCCESS_CODE) throw ApiException(getMessage(map, fallback))
+        val data = map["data"] as? Map<*, *> ?: throw ApiException(fallback)
+        val device = (data["items"] as? Map<*, *>) ?: data
+        return parseManagedDevice(device)
+    }
+
+    private fun parseManagedDevice(dev: Map<*, *>): ManagedDevice {
+        val at = dev["last_atcommand"] as? Map<*, *>
+        val atmap = parseStringMap(at?.get("atmap"))
+        val parm = dev["device_parm"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        return ManagedDevice(
+            id = asInt(dev["id"]),
+            callsign = dev["callsign"] as? String ?: "",
+            ssid = asInt(dev["ssid"]),
+            name = dev["name"] as? String ?: "",
+            grid = dev["gird"] as? String ?: "",
+            dmrId = asInt(dev["dmrid"]).takeIf { it != 0 } ?: asInt(dev["dmr_id"]),
+            devType = asInt(dev["dev_type"]),
+            devModel = asInt(dev["dev_model"]),
+            groupId = asInt(dev["group_id"]),
+            status = asInt(dev["status"]),
+            priority = asInt(dev["priority"]),
+            chanName = dev["chan_name"] as? String ?: "",
+            rfType = asInt(dev["rf_type"]),
+            note = dev["note"] as? String ?: "",
+            isOnline = dev["is_online"] as? Boolean ?: false,
+            qth = dev["qth"] as? String ?: "",
+            version = at?.get("version")?.let { asText(it) } ?: "",
+            atmap = atmap,
+            hasAt = at != null,
+            parm = parm.entries.mapNotNull { (k, v) ->
+                val key = k as? String ?: return@mapNotNull null
+                key to v
+            }.toMap()
+        )
+    }
+
+    private fun parseStringMap(raw: Any?): Map<String, String> {
+        val map = raw as? Map<*, *> ?: return emptyMap()
+        return map.entries.mapNotNull { (k, v) ->
+            val key = k as? String ?: return@mapNotNull null
+            key to asText(v)
+        }.toMap()
+    }
+
+    private fun asInt(value: Any?): Int = (value as? Number)?.toInt() ?: 0
+
+    private fun asText(value: Any?): String = when (value) {
+        null -> ""
+        is String -> value
+        is Number -> if (value.toDouble() % 1.0 == 0.0) value.toLong().toString() else value.toString()
+        else -> value.toString()
+    }
+
+    private fun makeRaw(url: String, body: String, contentType: String, serverHost: String): String {
+        val connection = open(url, "POST", serverHost)
+        connection.setRequestProperty("Content-Type", contentType)
+        connection.doOutput = true
+        connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
+        return readResponse(connection)
+    }
+
+    private fun makeMultipart(
+        url: String,
+        fields: Map<String, String>,
+        fileField: String,
+        file: File,
+        contentType: String = "image/jpeg"
+    ): String {
+        val boundary = "----78HAM${System.currentTimeMillis()}"
+        val connection = open(url, "POST", null)
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+        connection.doOutput = true
+        connection.outputStream.use { out ->
+            val writer = java.io.OutputStreamWriter(out, StandardCharsets.UTF_8)
+            fields.forEach { (key, value) ->
+                writer.write("--$boundary\r\n")
+                writer.write("Content-Disposition: form-data; name=\"$key\"\r\n\r\n")
+                writer.write(value)
+                writer.write("\r\n")
+            }
+            writer.write("--$boundary\r\n")
+            writer.write("Content-Disposition: form-data; name=\"$fileField\"; filename=\"${file.name}\"\r\n")
+            writer.write("Content-Type: $contentType\r\n\r\n")
+            writer.flush()
+            file.inputStream().use { it.copyTo(out) }
+            writer.write("\r\n--$boundary--\r\n")
+            writer.flush()
+        }
+        return readResponse(connection)
+    }
+
+    private fun open(url: String, method: String, serverHost: String?): HttpURLConnection =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = TIMEOUT_MS
+            readTimeout = TIMEOUT_MS
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+            serverHost?.let { getTokenForServer(it) }?.takeIf { it.isNotEmpty() }?.let {
+                setRequestProperty("x-token", it)
+            }
+        }
+
+    private fun readResponse(connection: HttpURLConnection): String {
+        var reusable = false
+        try {
+            val statusCode = connection.responseCode
+            val response = if (statusCode in 200..299) {
+                connection.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            }
+            if (statusCode !in 200..299) throw ApiException("HTTP $statusCode")
+            reusable = true
+            return response
+        } finally {
+            if (!reusable) connection.disconnect()
+        }
+    }
+
     // ============== 数据类 ==============
 
     data class UserInfo(
@@ -348,6 +631,7 @@ object ApiClient {
         val callsign: String,
         val dmrId: Int,
         val mdcid: String = "",
+        val avatar: String = "",
         val server: String? = null,
         val serverPort: Int? = null,
         val serverUdpPort: Int? = null
@@ -392,6 +676,35 @@ object ApiClient {
         val name: String,
         val host: String,
         val port: Int = 60050
+    )
+
+    data class OidcConfig(
+        val enabled: Boolean,
+        val buttonName: String
+    )
+
+    /** 我的设备 / AT 回复里的一台设备。parm 是老型号寄存器，原样留给设置页提交。 */
+    data class ManagedDevice(
+        val id: Int = 0,
+        val callsign: String = "",
+        val ssid: Int = 0,
+        val name: String = "",
+        val grid: String = "",
+        val dmrId: Int = 0,
+        val devType: Int = 0,
+        val devModel: Int = 0,
+        val groupId: Int = 0,
+        val status: Int = 0,
+        val priority: Int = 0,
+        val chanName: String = "",
+        val rfType: Int = 0,
+        val note: String = "",
+        val isOnline: Boolean = false,
+        val qth: String = "",
+        val version: String = "",
+        val atmap: Map<String, String> = emptyMap(),
+        val hasAt: Boolean = false,
+        val parm: Map<String, Any?> = emptyMap()
     )
 
     class ApiException(message: String) : Exception(message)

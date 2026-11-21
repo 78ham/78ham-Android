@@ -48,6 +48,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -104,6 +105,7 @@ class TalkService : Service() {
 
     val transmittingState: StateFlow<Boolean> get() = multiServerManager.transmittingState
     val receivingState: StateFlow<Boolean> get() = multiServerManager.receivingState
+    val liveSpeakers: StateFlow<Map<String, com.ham78.app.network.LiveSpeaker>> get() = multiServerManager.liveSpeakers
     val playingVoiceClipId: StateFlow<String?> get() = multiServerManager.playingVoiceClipId
 
     val textMessages: StateFlow<List<MessageStore.TextMessage>> get() = messageStore.allMessages
@@ -118,7 +120,7 @@ class TalkService : Service() {
 
         settingsRepository = SettingsRepository(this)
         locationManager = LocationManager(this)
-        messageStore = MessageStore.getInstance()
+        messageStore = MessageStore.getInstance(this)
 
         multiServerManager = MultiServerManager { udpClient ->
             AudioManager(this, udpClient)
@@ -128,9 +130,11 @@ class TalkService : Service() {
         setupServerStateListener()
         setupSettingsListener()
         setupNetworkMonitor()
-        setupPttController()
         setupPttButtonReceiver()
         createNotificationChannel()
+        // PTT 初始化要等磁盘设置（自定义按键），放 serviceScope 里等 ready；
+        // onCreate 本身不做任何磁盘 IO，主线程立即返回
+        serviceScope.launch { setupPttController() }
     }
 
     override fun onBind(intent: Intent): IBinder = binder
@@ -149,7 +153,7 @@ class TalkService : Service() {
         isRunning = true
         acquireKeepAliveLocks()
 
-        autoConnectAllServers()
+        serviceScope.launch { autoConnectAllServers() }
         startScheduleWatcher()
 
         return START_STICKY
@@ -159,9 +163,13 @@ class TalkService : Service() {
      * 同时自动连接所有已保存的服务器；
      * 列表为空时回退到默认设置中的服务器
      */
-    private fun autoConnectAllServers() {
+    private suspend fun autoConnectAllServers() {
+        // 等"磁盘设置已读入共享 flow"再取服务器列表：读太早拿到空列表/空账号，
+        // 自动连接会被整个跳过
+        settingsRepository.ready.first { it }
         val settings = settingsRepository.loadSettings()
-        if (settings.username.isEmpty() || settings.password.isEmpty()) return
+        val hasToken = settings.servers.any { !it.authToken.isNullOrEmpty() }
+        if ((settings.username.isEmpty() || settings.password.isEmpty()) && !hasToken) return
 
         val serversToConnect = if (settings.servers.isNotEmpty()) {
             settings.servers
@@ -180,6 +188,7 @@ class TalkService : Service() {
         }
 
         serversToConnect.forEach { config ->
+            if (config.password.isEmpty() && config.authToken.isNullOrEmpty()) return@forEach
             val alreadyOnline = _serverConnections.value.any {
                 it.serverId == config.id && it.isOnline
             }
@@ -240,7 +249,7 @@ class TalkService : Service() {
 
         releaseKeepAliveLocks()
         multiServerManager.release()
-        pttController.release()
+        if (::pttController.isInitialized) pttController.release()
         networkMonitor.stop()
         ttsAnnouncer?.release()
         ttsAnnouncer = null
@@ -528,7 +537,12 @@ class TalkService : Service() {
             }
 
             Log.d(TAG, "Scheduled broadcast: ${schedule.name} (mode=${schedule.mode})")
-            sendTts(schedule.content)
+            // TTS 合成/发送都可能失败（引擎未就绪、无活跃房间），静默失败会让用户
+            // 以为任务没触发；记日志便于排查"定时播报没响"的问题
+            val sent = sendTts(schedule.content)
+            if (!sent) {
+                Log.w(TAG, "Scheduled broadcast failed: ${schedule.name} (mode=${schedule.mode})")
+            }
         }
 
         lastScheduleMinute = minuteOfDay
@@ -539,8 +553,12 @@ class TalkService : Service() {
         sendTts(schedule.content)
     }
 
-    fun handleKeyEvent(event: android.view.KeyEvent): Boolean =
-        pttController.onKeyEvent(event)
+    fun handleKeyEvent(event: android.view.KeyEvent): Boolean {
+        // PTT 初始化移到了 serviceScope（等磁盘设置），onCreate 返回到首次按键之间
+        // 存在未初始化窗口：直接访问 lateinit 会崩，这里安全跳过
+        val controller = if (::pttController.isInitialized) pttController else return false
+        return controller.onKeyEvent(event)
+    }
 
     // ============== 文本消息 ==============
 
@@ -627,7 +645,7 @@ class TalkService : Service() {
     // ============== 内部方法 ==============
 
     private fun setupMessageCallbacks() {
-        multiServerManager.onTextMessageReceived = { serverId, callsign, ssid, content, timestamp ->
+        multiServerManager.onTextMessageReceived = { serverId, callsign, ssid, content, timestamp, devModel, dmrId ->
             val serverName = multiServerManager.serverConnections.value
                 .find { it.serverId == serverId }?.name ?: serverId
 
@@ -650,6 +668,8 @@ class TalkService : Service() {
                     serverName = serverName,
                     callsign = callsign,
                     ssid = ssid,
+                    devModel = devModel,
+                    dmrId = dmrId,
                     content = textContent,
                     timestamp = timestamp,
                     timestampMs = System.currentTimeMillis(),
@@ -659,7 +679,7 @@ class TalkService : Service() {
             )
         }
 
-        multiServerManager.onVoiceReceived = { serverId, callsign, ssid, clipId, durationMs ->
+        multiServerManager.onVoiceReceived = { serverId, callsign, ssid, clipId, durationMs, devModel, dmrId, opus, mdcLabel ->
             val serverName = multiServerManager.serverConnections.value
                 .find { it.serverId == serverId }?.name ?: serverId
 
@@ -674,6 +694,10 @@ class TalkService : Service() {
                     serverName = serverName,
                     callsign = callsign,
                     ssid = ssid,
+                    devModel = devModel,
+                    dmrId = dmrId,
+                    opus = opus,
+                    mdcLabel = mdcLabel,
                     content = content,
                     timestamp = timestamp,
                     timestampMs = System.currentTimeMillis(),
@@ -725,6 +749,8 @@ class TalkService : Service() {
         serviceScope.launch {
             networkMonitor.networkAvailable.collect { available ->
                 if (available) {
+                    // 恢复重连用服务器列表，同样等磁盘读完再取，避免启动早期拿到空列表
+                    settingsRepository.ready.first { it }
                     val savedServers = settingsRepository.loadServerList()
                     _serverConnections.value
                         .filter { !it.isOnline }
@@ -739,7 +765,10 @@ class TalkService : Service() {
         }
     }
 
-    private fun setupPttController() {
+    private suspend fun setupPttController() {
+        // 等"磁盘设置已读入共享 flow"再取按键配置：读太早会拿到默认值
+        // （音量上键/熄屏可按），配置过自定义 PTT 键的设备会暂时用错键。
+        settingsRepository.ready.first { it }
         val settings = settingsRepository.loadSettings()
         val deviceProfile = DeviceKeyProfiles.detect()
         val effectivePttKey = if (settings.pttKeyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {

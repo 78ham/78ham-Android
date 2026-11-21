@@ -28,6 +28,11 @@ class MessageStore(private val context: Context? = null) {
         val serverName: String = "",
         val callsign: String = "",
         val ssid: Int = 0,
+        val devModel: Int = 0,
+        val dmrId: Int = 0,
+        // 旧消息没有这两个字段。Gson 不走构造默认值，缺字段时是 null/false，界面按空处理
+        val opus: Boolean = false,
+        val mdcLabel: String? = null,
         val content: String = "",
         val timestamp: String = "",
         val timestampMs: Long = 0,
@@ -50,6 +55,7 @@ class MessageStore(private val context: Context? = null) {
 
     private val prefs: SharedPreferences? by lazy {
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?: Log.w("MessageStore", "No context provided — persistence disabled").let { null }
     }
 
     private val _allMessages = MutableStateFlow<List<TextMessage>>(emptyList())
@@ -59,7 +65,8 @@ class MessageStore(private val context: Context? = null) {
     val serverMessages: StateFlow<Map<String, List<TextMessage>>> = _serverMessages.asStateFlow()
 
     init {
-        loadFromDisk()
+        // Gson 反序列化整包消息可能较大，避免阻塞构造线程（可能在主线程）
+        saveScope.launch { loadFromDisk() }
     }
 
     fun addMessage(message: TextMessage) {
@@ -76,41 +83,27 @@ class MessageStore(private val context: Context? = null) {
         scheduleSave()
     }
 
-    fun getMessagesForServer(serverId: String): List<TextMessage> {
-        return messages[serverId]?.let { msgs ->
-            synchronized(msgs) { msgs.toList() }
-        } ?: emptyList()
-    }
-
-    fun getAllMessages(): List<TextMessage> {
-        return collectAllMessages()
-    }
-
-    fun clearServerMessages(serverId: String) {
-        messages.remove(serverId)
-        emitState()
-        saveToDisk()
-    }
-
-    fun clearAll() {
-        messages.clear()
-        emitState()
-        saveToDisk()
-    }
-
-    private fun collectAllMessages(): List<TextMessage> =
-        messages.values.flatMap { msgs ->
-            synchronized(msgs) { msgs.toList() }
-        }.sortedBy { it.timestampMs }
-
     private fun emitState() {
-        // 单次快照：所有服务器消息只做一遍加锁拷贝，all 与 byServer 共享同一份快照，
-        // 避免每条消息触发两次全量列表复制 + 排序
+        // 单次快照：所有服务器消息只做一遍加锁拷贝，all 与 byServer 共享同一份快照。
+        // 各服务器列表本身按到达序追加（timestampMs 单调），归并替代全量排序；
+        // 归并结果仅取最近 500 条。
         val snapshot = messages.mapValues { (_, msgs) ->
             synchronized(msgs) { msgs.toList() }
         }
-        _allMessages.value = snapshot.values.flatten().sortedBy { it.timestampMs }.takeLast(500)
+        _allMessages.value = mergeSorted(snapshot.values).takeLast(500)
         _serverMessages.value = snapshot
+    }
+
+    private fun mergeSorted(lists: Collection<List<TextMessage>>): List<TextMessage> {
+        val queue = java.util.PriorityQueue<List<TextMessage>>(java.util.Comparator.comparing { l: List<TextMessage> -> l.firstOrNull()?.timestampMs ?: Long.MAX_VALUE })
+        lists.forEach { if (it.isNotEmpty()) queue.offer(it) }
+        val result = ArrayList<TextMessage>()
+        while (queue.isNotEmpty()) {
+            val smallest = queue.poll()
+            result.add(smallest.first())
+            if (smallest.size > 1) queue.offer(smallest.subList(1, smallest.size))
+        }
+        return result
     }
 
     private fun loadFromDisk() {
@@ -118,8 +111,20 @@ class MessageStore(private val context: Context? = null) {
         try {
             val type = object : TypeToken<Map<String, List<TextMessage>>>() {}.type
             val loaded: Map<String, List<TextMessage>> = gson.fromJson(json, type) ?: return
+            // 异步加载与启动初期的实时消息存在竞态：加载完成时内存里可能已经有
+            // 新收到的消息，直接 put 会把它们覆盖掉。按 id 去重合并，再按时间排序。
             loaded.forEach { (serverId, msgs) ->
-                messages[serverId] = ArrayList(msgs)
+                val existing = messages.putIfAbsent(serverId, ArrayList(msgs))
+                if (existing != null) {
+                    synchronized(existing) {
+                        val knownIds = existing.mapTo(HashSet()) { it.id }
+                        existing.addAll(msgs.filter { it.id !in knownIds })
+                        existing.sortBy { it.timestampMs }
+                        while (existing.size > maxMessagesPerServer) {
+                            existing.removeAt(0)
+                        }
+                    }
+                }
             }
             emitState()
         } catch (e: Exception) {

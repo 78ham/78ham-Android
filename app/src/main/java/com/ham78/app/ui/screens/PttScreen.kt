@@ -1,5 +1,6 @@
 package com.ham78.app.ui.screens
 
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.EaseInOutCubic
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -7,8 +8,18 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
+import com.ham78.app.ui.holdToTalk
+import com.ham78.app.ui.rememberPulseScale
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -63,15 +74,15 @@ import androidx.compose.ui.unit.sp
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import com.ham78.app.network.DevModel
 import com.ham78.app.network.MessageStore
 import com.ham78.app.network.ServerConnection
 import com.ham78.app.service.TalkService
 import com.ham78.app.ui.theme.BrandCyan
 import com.ham78.app.ui.theme.BrandPink
 import com.ham78.app.ui.theme.BrandPurple
+import com.ham78.app.ui.theme.Disconnected
 import com.ham78.app.ui.theme.PttTransmitting
-import com.ham78.app.ui.theme.ServerOffline
-import com.ham78.app.ui.theme.ServerOnline
 import com.ham78.app.ui.theme.Surface
 import com.ham78.app.ui.theme.SurfaceCard
 import com.ham78.app.ui.theme.TextOnPrimary
@@ -79,24 +90,30 @@ import com.ham78.app.ui.theme.TextPrimary
 import com.ham78.app.ui.theme.TextSecondary
 
 /**
- * PTT 主页面：当前选中服务器与频道状态 + 实时消息列表 + 文本输入栏。
- * 对讲按键使用全局的底部 PTT 控制条（PttControlBar）。
- * 页面与语音同时在线：同一时间只加入一个房间；
- * 在频道页选择其他服务器时，会自动切换选中服务器并退出原房间。
+ * 对讲页：消息记录 + 底部这一条操作。
+ * 频道名和发射/接收在顶栏，这里不再重复。
+ * 默认是圆形按住说话；点「文字」换成输入框，点麦克风回到按键。
+ * 同一时间只加入一个房间；在频道页点其它服务器的频道会切过去并回到本页。
  */
 @Composable
 fun PttScreen(
     activeServer: ServerConnection?,
     isTransmitting: Boolean,
-    isReceiving: Boolean,
     messages: List<MessageStore.TextMessage>,
     onSendMessage: (String) -> Unit,
     onSendLocation: () -> Unit,
+    onPressPtt: () -> Unit,
+    onReleasePtt: () -> Unit,
+    listenLines: List<String> = emptyList(),
+    speakingBars: List<SpeakingBar> = emptyList(),
+    onOpenListen: () -> Unit = {},
     onReplayVoice: (String) -> Unit = {},
     playingVoiceClipId: String? = null,
     talkService: TalkService? = null   // 发送工具面板需要；测试环境可为空
 ) {
     var inputText by remember { mutableStateOf("") }
+    var voiceMode by rememberSaveable { mutableStateOf(true) }
+    val online = activeServer?.isOnline == true
 
     // 发送工具面板的开关状态：必须声明在顶层。
     // 之前声明在底部输入栏 Row 的 lambda 里，那个 lambda 每次重组都会重新执行，
@@ -123,104 +140,25 @@ fun PttScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 标题 + 选中服务器状态
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            speakingBars.forEach { bar ->
+                LiveVoiceBar(bar = bar)
+            }
+            if (listenLines.isNotEmpty()) {
                 Text(
-                    text = "PTT 对讲",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                    text = "同时收听  ${listenLines.joinToString("  ·  ")}",
+                    fontSize = 12.sp,
+                    color = BrandPurple,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onOpenListen)
+                        .padding(top = 8.dp, bottom = 4.dp)
                 )
-                if (activeServer != null) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (activeServer.isOnline) ServerOnline.copy(alpha = 0.15f)
-                        else ServerOffline.copy(alpha = 0.15f)
-                    ) {
-                        Text(
-                            text = activeServer.name,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            fontSize = 12.sp,
-                            color = if (activeServer.isOnline) ServerOnline else ServerOffline,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
+            } else {
+                Spacer(modifier = Modifier.height(8.dp))
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 选中服务器的频道状态卡片
-            activeServer?.let { conn ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceCard)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "当前频道",
-                                fontSize = 11.sp,
-                                color = TextSecondary
-                            )
-                            Text(
-                                text = if (conn.currentRoomId > 0)
-                                    conn.currentGroupName.ifEmpty { "频道 ${conn.currentRoomId}" }
-                                else
-                                // 0 号频道是公共大厅：心跳自动落进去，不是"未加入"
-                                    if (conn.isOnline) "公共大厅"
-                                    else "未连接",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "${conn.name} · 呼号 ${conn.callsign.ifEmpty { "--" }}",
-                                fontSize = 12.sp,
-                                color = TextSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            // 在线设备数：服务器 5 秒轮询带回，之前一直没展示（"不显示设备"）
-                            if (conn.isOnline && conn.onlineCount > 0) {
-                                Text(
-                                    text = "在线设备 ${conn.onlineCount}",
-                                    fontSize = 12.sp,
-                                    color = ServerOnline,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                        when {
-                            isTransmitting -> StatusBadge("TX", PttTransmitting, showWave = true)
-                            isReceiving -> StatusBadge("RX", BrandPurple, showWave = true)
-                            else -> Text(
-                                text = "待机",
-                                fontSize = 12.sp,
-                                color = TextSecondary.copy(alpha = 0.6f)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
 
             // 消息列表
             if (messages.isEmpty()) {
@@ -239,12 +177,12 @@ fun PttScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "收到的语音和文字会显示在这里",
+                            text = if (online) "收到的语音和文字会显示在这里" else "还没有连上服务器",
                             fontSize = 15.sp,
                             color = TextSecondary
                         )
                         Text(
-                            text = "按住底部 PTT 说话，或输入文字发送",
+                            text = if (online) "按住下方按钮说话，或切到文字" else "到「服务器」页连接一台",
                             fontSize = 12.sp,
                             color = TextSecondary.copy(alpha = 0.6f),
                             modifier = Modifier.padding(top = 4.dp)
@@ -271,130 +209,253 @@ fun PttScreen(
                 }
             }
 
-            // 底部输入栏
-            if (activeServer != null && activeServer.isOnline) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .imePadding()
-                        .padding(vertical = 8.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = CardDefaults.cardColors(containerColor = Surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // 发送工具：CW/DTMF/SSTV/TTS/录音
-                        IconButton(
-                            onClick = { showTools = true },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.Apps,
-                                contentDescription = "发送工具",
-                                tint = BrandPurple,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        if (showTools) {
-                            talkService?.let { svc ->
-                                TransmitToolsDialog(
-                                    talkService = svc,
-                                    onDismiss = { showTools = false }
-                                )
-                            }
-                        }
-
-                        IconButton(
-                            onClick = onSendLocation,
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.LocationOn,
-                                contentDescription = "发送位置",
-                                tint = BrandCyan,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-
-                        TextField(
-                            value = inputText,
-                            onValueChange = { inputText = it },
-                            placeholder = {
-                                Text("输入消息...", color = TextSecondary.copy(alpha = 0.5f), fontSize = 14.sp)
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(44.dp),
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                cursorColor = BrandPurple
-                            ),
-                            singleLine = true,
-                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp)
-                        )
-
-                        IconButton(
-                            onClick = {
-                                if (inputText.isNotBlank()) {
-                                    onSendMessage(inputText.trim())
-                                    inputText = ""
-                                }
-                            },
-                            modifier = Modifier
-                                .size(40.dp)
-                                .padding(2.dp)
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "发送",
-                                tint = if (inputText.isNotBlank()) BrandPurple else TextSecondary.copy(alpha = 0.4f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
+            TalkComposer(
+                online = online,
+                voiceMode = voiceMode,
+                onVoiceModeChange = { voiceMode = it },
+                isTransmitting = isTransmitting,
+                inputText = inputText,
+                onInputChange = { inputText = it },
+                onSend = {
+                    if (inputText.isNotBlank()) {
+                        onSendMessage(inputText.trim())
+                        inputText = ""
                     }
+                },
+                onSendLocation = onSendLocation,
+                onOpenTools = { showTools = true },
+                onPressPtt = onPressPtt,
+                onReleasePtt = onReleasePtt
+            )
+            if (showTools) {
+                talkService?.let { svc ->
+                    TransmitToolsDialog(
+                        talkService = svc,
+                        onDismiss = { showTools = false }
+                    )
                 }
             }
         }
     }
 }
 
+/**
+ * 对讲页底部只有一条：要么按住说话，要么打字。两套叠在一起会把消息列表挤没。
+ */
 @Composable
-private fun StatusBadge(label: String, color: Color, showWave: Boolean = false) {
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = color.copy(alpha = 0.15f)
+private fun TalkComposer(
+    online: Boolean,
+    voiceMode: Boolean,
+    onVoiceModeChange: (Boolean) -> Unit,
+    isTransmitting: Boolean,
+    inputText: String,
+    onInputChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onSendLocation: () -> Unit,
+    onOpenTools: () -> Unit,
+    onPressPtt: () -> Unit,
+    onReleasePtt: () -> Unit
+) {
+    if (online && !voiceMode) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .padding(vertical = 8.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = { onVoiceModeChange(true) },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Mic,
+                        contentDescription = "切换到按住说话",
+                        tint = BrandPurple,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onOpenTools,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Apps,
+                        contentDescription = "发送工具",
+                        tint = BrandPurple,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onSendLocation,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.LocationOn,
+                        contentDescription = "发送位置",
+                        tint = BrandCyan,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                TextField(
+                    value = inputText,
+                    onValueChange = onInputChange,
+                    placeholder = {
+                        Text("输入消息...", color = TextSecondary.copy(alpha = 0.5f), fontSize = 14.sp)
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        cursorColor = BrandPurple
+                    ),
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp)
+                )
+                IconButton(
+                    onClick = onSend,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .padding(2.dp)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "发送",
+                        tint = if (inputText.isNotBlank()) BrandPurple else TextSecondary.copy(alpha = 0.4f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.Center
         ) {
-            Text(
-                text = label,
-                fontSize = 12.sp,
-                color = color,
-                fontWeight = FontWeight.Bold
+            if (online) {
+                IconButton(onClick = onOpenTools, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        Icons.Filled.Apps,
+                        contentDescription = "发送工具",
+                        tint = BrandPurple,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            RoundPttButton(
+                isConnected = online,
+                isTransmitting = isTransmitting,
+                onPress = onPressPtt,
+                onRelease = onReleasePtt
             )
-            if (showWave) {
-                VoiceWaveformBars(
-                    isPlaying = true,
-                    color = color
+            if (online) {
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(onClick = onSendLocation, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        Icons.Filled.LocationOn,
+                        contentDescription = "发送位置",
+                        tint = BrandCyan,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+        }
+        if (online) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onVoiceModeChange(false) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Filled.Keyboard,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(16.dp)
                 )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("文字", fontSize = 13.sp, color = TextSecondary)
             }
         }
     }
 }
 
+@Composable
+private fun RoundPttButton(
+    isConnected: Boolean,
+    isTransmitting: Boolean,
+    onPress: () -> Unit,
+    onRelease: () -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    val pulseScale = rememberPulseScale(isTransmitting)
+    val label = when {
+        isTransmitting -> "松开停止"
+        isConnected -> "按住说话"
+        else -> "未连接"
+    }
+    Box(
+        modifier = Modifier
+            .size(104.dp)
+            .scale(if (isTransmitting) pulseScale else 1f)
+            .shadow(
+                elevation = if (isConnected) 10.dp else 2.dp,
+                shape = CircleShape,
+                ambientColor = if (isTransmitting) PttTransmitting else BrandPurple,
+                spotColor = if (isTransmitting) PttTransmitting else BrandPurple
+            )
+            .clip(CircleShape)
+            .background(
+                when {
+                    isTransmitting -> PttTransmitting
+                    isConnected -> BrandPurple
+                    else -> Disconnected
+                }
+            )
+            .holdToTalk(isConnected, haptic, onPress, onRelease),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                if (isConnected) Icons.Filled.Mic else Icons.Filled.MicOff,
+                contentDescription = null,
+                tint = TextOnPrimary,
+                modifier = Modifier.size(28.dp)
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = label,
+                color = TextOnPrimary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
 
 @Composable
 fun MessageBubble(
@@ -470,6 +531,13 @@ fun MessageBubble(
                         fontWeight = FontWeight.Bold,
                         color = BrandPurple
                     )
+                    if (message.dmrId != 0) {
+                        Text(
+                            text = "DMR ${message.dmrId}",
+                            fontSize = 10.sp,
+                            color = TextSecondary
+                        )
+                    }
                     if (message.serverName.isNotEmpty()) {
                         Text(
                             text = message.serverName,
@@ -478,29 +546,56 @@ fun MessageBubble(
                         )
                     }
                 }
+                if (!message.mdcLabel.isNullOrEmpty()) {
+                    Text(
+                        text = message.mdcLabel,
+                        fontSize = 10.sp,
+                        color = BrandPurple,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                val deviceName = DevModel.name(message.devModel)
+                if (deviceName.isNotEmpty()) {
+                    Text(
+                        text = deviceName,
+                        fontSize = 10.sp,
+                        color = TextSecondary
+                    )
+                }
                 Spacer(modifier = Modifier.height(2.dp))
             }
 
             when (message.type) {
                 MessageStore.MessageType.VOICE -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    val seconds = message.voiceDurationMs / 1000f
+                    val barWidth = (96 + seconds * 16f).coerceIn(96f, 240f).dp
+                    Row(
+                        modifier = Modifier.width(barWidth),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Icon(
                             imageVector = if (isPlayingThisVoice) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                             contentDescription = if (isPlayingThisVoice) "暂停" else "回放语音",
                             tint = if (message.isSelf) TextOnPrimary else BrandPurple,
                             modifier = Modifier.size(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = message.content,
-                            color = if (message.isSelf) TextOnPrimary else TextPrimary,
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         VoiceWaveformBars(
                             isPlaying = isPlayingThisVoice,
                             color = if (message.isSelf) TextOnPrimary else BrandPurple
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (seconds > 0) "${kotlin.math.ceil(seconds.toDouble()).toInt()}″" else message.content,
+                            color = if (message.isSelf) TextOnPrimary else TextPrimary,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        Text(
+                            text = if (message.opus) "Opus" else "G.711",
+                            fontSize = 10.sp,
+                            color = if (message.isSelf) TextOnPrimary.copy(alpha = 0.7f) else TextSecondary
                         )
                     }
                 }
@@ -527,6 +622,80 @@ fun MessageBubble(
                 modifier = Modifier.align(Alignment.End)
             )
         }
+    }
+}
+
+/** 正在接收的一条语音。时长按收到的声音累计，条的宽度跟着变长。 */
+data class SpeakingBar(
+    val key: String,
+    val title: String,
+    val durationMs: Long,
+    val opus: Boolean,
+    val dmrId: Int = 0,
+    val mdcLabel: String = ""
+)
+
+@Composable
+private fun LiveVoiceBar(bar: SpeakingBar) {
+    val seconds = bar.durationMs / 1000f
+    val target = (96 + seconds * 16f).coerceIn(96f, 260f).dp
+    val width by animateDpAsState(target, tween(200), label = "liveVoiceWidth")
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Text(
+            text = bar.title,
+            fontSize = 11.sp,
+            color = BrandPurple,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        val beside = listOf(
+            if (bar.dmrId != 0) "DMR ${bar.dmrId}" else "",
+            bar.mdcLabel
+        ).filter { it.isNotEmpty() }
+        if (beside.isNotEmpty()) {
+            Text(
+                text = beside.joinToString("  "),
+                fontSize = 10.sp,
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = BrandPurple.copy(alpha = 0.12f),
+            border = BorderStroke(1.dp, BrandPurple.copy(alpha = 0.7f)),
+            modifier = Modifier.width(width)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                VoiceWaveformBars(isPlaying = true, color = BrandPurple)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "${kotlin.math.ceil(seconds.toDouble()).toInt()}″",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = if (bar.opus) "Opus" else "G.711",
+                    fontSize = 10.sp,
+                    color = TextSecondary
+                )
+            }
+        }
+        Text(
+            text = "正在接收",
+            fontSize = 10.sp,
+            color = BrandPurple,
+            modifier = Modifier.padding(top = 2.dp)
+        )
     }
 }
 

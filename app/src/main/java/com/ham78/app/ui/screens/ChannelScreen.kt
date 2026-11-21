@@ -1,11 +1,5 @@
 package com.ham78.app.ui.screens
 
-import androidx.compose.animation.core.EaseInOutCubic
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,15 +20,18 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -59,6 +57,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ham78.app.network.ApiClient
+import com.ham78.app.network.DevModel
+import com.ham78.app.network.LiveSpeaker
 import com.ham78.app.network.ServerConnection
 import com.ham78.app.ui.theme.BrandPurple
 import com.ham78.app.ui.theme.Divider
@@ -72,7 +72,7 @@ import com.ham78.app.ui.theme.TextSecondary
 
 /**
  * 频道页：按服务器分组的频道列表，每个服务器可折叠展开。
- * 每个频道可"加入"（可发可收）或"收听"（只收不发），收听中的频道显示耳朵标记。
+ * 点一行就是加入这个频道并回到对讲页。旁边的「只听」是只收不发，留在本页继续选。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,7 +83,10 @@ fun ChannelScreen(
     onJoinRoom: (serverId: String, roomId: Int) -> Unit,
     onListen: (serverId: String, roomId: Int) -> Unit = { _, _ -> },
     onStopListen: (serverId: String) -> Unit = {},
-    onRefresh: (serverId: String) -> Unit
+    onRefresh: (serverId: String) -> Unit,
+    onTuned: () -> Unit = {},
+    liveSpeakers: List<LiveSpeaker> = emptyList(),
+    onOpenGroup: (ServerConnection) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
 
@@ -195,7 +198,9 @@ fun ChannelScreen(
                             onJoinRoom = onJoinRoom,
                             onListen = onListen,
                             onStopListen = { onStopListen(conn.serverId) },
-                            onRefresh = { onRefresh(conn.serverId) }
+                            onRefresh = { onRefresh(conn.serverId) },
+                            onTuned = onTuned,
+                            liveSpeakers = liveSpeakers.filter { it.serverId == conn.serverId }
                         )
                     }
 
@@ -216,7 +221,9 @@ private fun ServerChannelSection(
     onJoinRoom: (serverId: String, roomId: Int) -> Unit,
     onListen: (serverId: String, roomId: Int) -> Unit = { _, _ -> },
     onStopListen: () -> Unit = {},
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onTuned: () -> Unit = {},
+    liveSpeakers: List<LiveSpeaker> = emptyList()
 ) {
     // 默认收起；选中房间所在的服务器组自动展开，展示"当前"标记
     var expanded by rememberSaveable(connection.serverId) { mutableStateOf(false) }
@@ -310,6 +317,46 @@ private fun ServerChannelSection(
             if (expanded) {
                 HorizontalDivider(color = Divider.copy(alpha = 0.5f))
 
+                if (connection.isOnline) {
+                    Text(
+                        text = "群组详情",
+                        color = BrandPurple,
+                        fontSize = 13.sp,
+                        modifier = Modifier
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .clickable { onOpenGroup(connection) }
+                    )
+                }
+
+                if (connection.onlineDevices.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = connection.currentGroupName.ifEmpty { "当前频道" } + " · 在线设备",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                        connection.onlineDevices.take(12).forEach { device ->
+                            Text(
+                                text = DevModel.who(device.callsign, device.ssid, device.devModel),
+                                fontSize = 13.sp,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (connection.onlineDevices.size > 12) {
+                            Text(
+                                text = "还有 ${connection.onlineDevices.size - 12} 台",
+                                fontSize = 12.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                }
+
                 when {
                     !connection.isOnline -> Text(
                         text = "未连接，无法获取频道列表",
@@ -353,7 +400,7 @@ private fun ServerChannelSection(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        "🎧 收听中 · 频道 $listeningRoomId",
+                                        "收听中 · 频道 $listeningRoomId",
                                         fontSize = 12.sp,
                                         color = BrandPurple,
                                         modifier = Modifier.weight(1f)
@@ -372,10 +419,10 @@ private fun ServerChannelSection(
                                 room = room,
                                 isCurrentRoom = isCurrent,
                                 isListening = isListening,
+                                speaker = liveSpeakers.find { it.roomId == room.id },
                                 onClick = {
-                                    if (!isCurrent) {
-                                        onJoinRoom(connection.serverId, room.id)
-                                    }
+                                    if (!isCurrent) onJoinRoom(connection.serverId, room.id)
+                                    onTuned()
                                 },
                                 onListenClick = {
                                     // 收听中的频道点耳朵 = 停止收听；否则开始收听
@@ -397,7 +444,8 @@ fun ChannelItem(
     isCurrentRoom: Boolean,
     onClick: () -> Unit,
     isListening: Boolean = false,        // 收听中（只收不发）
-    onListenClick: () -> Unit = {}       // 点耳朵图标：开始/停止收听
+    speaker: LiveSpeaker? = null,        // 这个房间此刻正在说话的人
+    onListenClick: () -> Unit = {}       // 点「只听 / 停听」：开始或停止只收不发
 ) {
     Card(
         modifier = Modifier
@@ -448,10 +496,6 @@ fun ChannelItem(
 
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (isCurrentRoom) {
-                            ChannelPulseIndicator()
-                            Spacer(modifier = Modifier.width(6.dp))
-                        }
                         Text(
                             text = room.name,
                             fontSize = 15.sp,
@@ -462,7 +506,7 @@ fun ChannelItem(
                         )
                         if (isListening) {
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("🎧 收听中", fontSize = 11.sp, color = BrandPurple)
+                            Text("收听中", fontSize = 11.sp, color = BrandPurple)
                         }
                     }
                     Spacer(modifier = Modifier.height(2.dp))
@@ -485,6 +529,16 @@ fun ChannelItem(
                             color = TextSecondary.copy(alpha = 0.6f)
                         )
                     }
+                    if (speaker != null) {
+                        Text(
+                            text = "说话中 · ${DevModel.who(speaker.callsign, speaker.ssid, speaker.devModel)}",
+                            fontSize = 12.sp,
+                            color = ServerOnline,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
@@ -505,7 +559,7 @@ fun ChannelItem(
                                 .background(ServerOnline)
                         )
                         Text(
-                            text = "通话中",
+                            text = "当前",
                             fontSize = 12.sp,
                             color = BrandPurple,
                             fontWeight = FontWeight.Bold
@@ -514,19 +568,19 @@ fun ChannelItem(
                 }
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 耳朵开关：收听该频道（只收不发）；收听中高亮
-                    IconButton(
-                        onClick = onListenClick,
-                        modifier = Modifier.size(34.dp)
-                    ) {
+                    TextButton(onClick = onListenClick) {
                         Text(
-                            text = if (isListening) "🎧" else "👂",
-                            fontSize = 16.sp
+                            text = if (isListening) "停听" else "只听",
+                            fontSize = 13.sp,
+                            color = if (isListening) BrandPurple else TextSecondary
                         )
                     }
-                    TextButton(onClick = onClick) {
-                        Text("加入", fontSize = 13.sp)
-                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = "加入",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
         }
@@ -534,25 +588,108 @@ fun ChannelItem(
 }
 
 /**
- * 频道活跃呼吸脉冲绿灯
+ * 从对讲页点开的换台列表：只列当前这台服务器的频道。
+ * 点一行就加入；多台服务器的收听仍去频道页。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ChannelPulseIndicator() {
-    val transition = rememberInfiniteTransition(label = "pulse")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = EaseInOutCubic),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseAlpha"
-    )
-
-    Box(
-        modifier = Modifier
-            .size(8.dp)
-            .clip(CircleShape)
-            .background(ServerOnline.copy(alpha = alpha))
-    )
+fun ChannelPickerSheet(
+    serverName: String,
+    rooms: List<ApiClient.RoomInfo>,
+    currentRoomId: Int,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onPick: (roomId: Int) -> Unit,
+    onOpenAll: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Surface,
+        contentColor = TextPrimary,
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(color = TextSecondary.copy(alpha = 0.45f))
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text(
+                text = "切换频道",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Text(
+                text = serverName,
+                fontSize = 13.sp,
+                color = TextSecondary,
+                modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+            )
+            if (isLoading && rooms.size <= 1) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = BrandPurple
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("加载频道中...", fontSize = 13.sp, color = TextSecondary)
+                }
+            }
+            LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                items(rooms, key = { it.id }) { room ->
+                    val current = room.id == currentRoomId
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (current) BrandPurple.copy(alpha = 0.14f) else Color.Transparent)
+                            .clickable(enabled = !current) { onPick(room.id) }
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = room.name,
+                                fontSize = 15.sp,
+                                fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
+                                color = if (current) BrandPurple else TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (room.memberCount > 0) {
+                                Text(
+                                    text = "${room.memberCount} 人",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        if (current) {
+                            Text(
+                                text = "当前",
+                                fontSize = 13.sp,
+                                color = BrandPurple,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                item {
+                    TextButton(
+                        onClick = onOpenAll,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("全部服务器的频道", color = TextSecondary, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+    }
 }

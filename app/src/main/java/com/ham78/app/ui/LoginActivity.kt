@@ -31,15 +31,18 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +63,8 @@ import androidx.core.content.ContextCompat
 import com.ham78.app.data.ServerConfig
 import com.ham78.app.data.SettingsRepository
 import com.ham78.app.network.ApiClient
+import com.ham78.app.ui.screens.OidcWebScreen
+import com.ham78.app.ui.screens.RegisterScreen
 import com.ham78.app.ui.theme.BrandPurple
 import com.ham78.app.ui.theme.Divider
 import com.ham78.app.ui.theme.Error
@@ -68,7 +73,18 @@ import com.ham78.app.ui.theme.SurfaceCard
 import com.ham78.app.ui.theme.TextOnPrimary
 import com.ham78.app.ui.theme.TextPrimary
 import com.ham78.app.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+
+private fun oidcLoginUrl(host: String): String {
+    val base = when {
+        host.startsWith("http://", ignoreCase = true) -> host
+        host.startsWith("https://", ignoreCase = true) -> host
+        else -> "https://$host"
+    }.trimEnd('/')
+    return "$base/user/oidc/login"
+}
 
 class LoginActivity : ComponentActivity() {
 
@@ -79,8 +95,8 @@ class LoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val settingsRepository = SettingsRepository(this)
-        val settings = settingsRepository.loadSettings()
+        // 设置读取（加密 prefs 解密）是异步的，这里不再同步读盘判断"是否已配置过账号"，
+        // 改由 LoginScreen 内部的 LaunchedEffect 等待 ready 后跳转（见下方）。
 
         val needsPermission = ContextCompat.checkSelfPermission(
             this, Manifest.permission.RECORD_AUDIO
@@ -93,12 +109,6 @@ class LoginActivity : ComponentActivity() {
                     Manifest.permission.ACCESS_FINE_LOCATION
                 ), 100
             )
-        }
-
-        if (settings.username.isNotEmpty() && settings.password.isNotEmpty() && settings.autoConnect) {
-            startActivity(Intent(this, MainActivity::class.java))
-            finish()
-            return
         }
 
         setContent {
@@ -131,7 +141,151 @@ fun LoginScreen(
     var password by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
+    // 明文 http 二次确认：null=不显示，非 null=待确认的地址
+    var pendingPlainHttp by remember { mutableStateOf<String?>(null) }
     var passwordVisible by remember { mutableStateOf(false) }
+    var showRegister by remember { mutableStateOf(false) }
+    var oidcUrl by remember { mutableStateOf<String?>(null) }
+    var oidcButton by remember { mutableStateOf("") }
+
+    // 已配置账号（自动连接）时直接进主界面：等磁盘设置读完再判断，
+    // 否则会拿到"还没读盘"的默认值而漏判。未配置则停留在本页。
+    LaunchedEffect(Unit) {
+        val repo = SettingsRepository(context)
+        repo.ready.first { it }
+        val settings = repo.loadSettings()
+        if (settings.username.isNotEmpty() && settings.password.isNotEmpty() && settings.autoConnect) {
+            onSkipLogin()
+        }
+    }
+
+    LaunchedEffect(serverAddress) {
+        delay(400)
+        val config = ApiClient.getOidcConfig(serverAddress).getOrNull()
+        oidcButton = if (config?.enabled == true) config.buttonName.ifBlank { "OIDC 登录" } else ""
+    }
+
+    // --- 登录并保存服务器配置 ---
+    fun doLogin() {
+        scope.launch {
+            try {
+                val result = ApiClient.login(
+                    serverHost = serverAddress,
+                    username = username,
+                    password = password
+                )
+
+                result.fold(
+                    onSuccess = { userInfo ->
+                        val settingsRepo = SettingsRepository(context)
+                        val currentSettings = settingsRepo.loadSettings()
+                        val serverConfig = ServerConfig(
+                            id = "${serverAddress}:60050",
+                            name = serverAddress,
+                            host = serverAddress,
+                            port = 60050,
+                            username = username,
+                            password = password,
+                            autoConnect = true
+                        )
+                        val servers = currentSettings.servers.toMutableList()
+                        servers.removeAll { it.id == serverConfig.id }
+                        servers.add(serverConfig)
+
+                        settingsRepo.saveSettings(
+                            currentSettings.copy(
+                                username = username,
+                                password = password,
+                                serverAddress = serverAddress,
+                                callsign = userInfo.callsign,
+                                dmrId = userInfo.dmrId,
+                                autoConnect = true,
+                                servers = servers
+                            )
+                        )
+
+                        onLoginSuccess()
+                    },
+                    onFailure = { e ->
+                        errorMessage = "登录失败: ${e.message}"
+                    }
+                )
+            } catch (e: Exception) {
+                errorMessage = "错误: ${e.message}"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    fun completeOidc(token: String) {
+        scope.launch {
+            isLoading = true
+            errorMessage = ""
+            ApiClient.setTokenForServer(serverAddress, token)
+            val user = ApiClient.getUserInfo(serverAddress).getOrNull()
+            if (user == null || user.callsign.isEmpty()) {
+                errorMessage = "OIDC 登录失败"
+                isLoading = false
+                return@launch
+            }
+            val settingsRepo = SettingsRepository(context)
+            val current = settingsRepo.loadSettings()
+            val serverConfig = ServerConfig(
+                id = "${serverAddress}:60050",
+                name = serverAddress,
+                host = serverAddress,
+                port = 60050,
+                username = user.username.ifEmpty { user.callsign },
+                password = "",
+                autoConnect = true,
+                authToken = token
+            )
+            val servers = current.servers.toMutableList()
+            servers.removeAll { it.id == serverConfig.id }
+            servers.add(serverConfig)
+            settingsRepo.saveSettings(
+                current.copy(
+                    username = serverConfig.username,
+                    password = "",
+                    serverAddress = serverAddress,
+                    callsign = user.callsign,
+                    dmrId = user.dmrId,
+                    autoConnect = true,
+                    servers = servers
+                )
+            )
+            onLoginSuccess()
+        }
+    }
+
+    val pageUrl = oidcUrl
+    if (pageUrl != null) {
+        OidcWebScreen(
+            url = pageUrl,
+            onToken = { token ->
+                oidcUrl = null
+                completeOidc(token)
+            },
+            onError = { err ->
+                oidcUrl = null
+                errorMessage = err.ifBlank { "OIDC 登录失败" }
+            },
+            onCancel = { oidcUrl = null }
+        )
+        return
+    }
+    if (showRegister) {
+        RegisterScreen(
+            serverHost = serverAddress,
+            onBack = { showRegister = false },
+            onSubmitted = { message ->
+                showRegister = false
+                errorMessage = message
+            }
+        )
+        return
+    }
 
     Box(
         modifier = Modifier
@@ -282,59 +436,14 @@ fun LoginScreen(
                                 errorMessage = "请输入用户名和密码"
                                 return@Button
                             }
-
+                            // 明文 http 会让登录密码和 token 明文过网，必须用户确认才放行
+                            if (serverAddress.trim().startsWith("http://", ignoreCase = true)) {
+                                pendingPlainHttp = serverAddress.trim()
+                                return@Button
+                            }
                             isLoading = true
                             errorMessage = ""
-
-                            scope.launch {
-                                try {
-                                    val result = ApiClient.login(
-                                        serverHost = serverAddress,
-                                        username = username,
-                                        password = password
-                                    )
-
-                                    result.fold(
-                                        onSuccess = { userInfo ->
-                                            val settingsRepo = SettingsRepository(context)
-                                            val currentSettings = settingsRepo.loadSettings()
-                                            val serverConfig = ServerConfig(
-                                                id = "${serverAddress}:60050",
-                                                name = serverAddress,
-                                                host = serverAddress,
-                                                port = 60050,
-                                                username = username,
-                                                password = password,
-                                                autoConnect = true
-                                            )
-                                            val servers = currentSettings.servers.toMutableList()
-                                            servers.removeAll { it.id == serverConfig.id }
-                                            servers.add(serverConfig)
-
-                                            settingsRepo.saveSettings(
-                                                currentSettings.copy(
-                                                    username = username,
-                                                    password = password,
-                                                    serverAddress = serverAddress,
-                                                    callsign = userInfo.callsign,
-                                                    dmrId = userInfo.dmrId,
-                                                    autoConnect = true,
-                                                    servers = servers
-                                                )
-                                            )
-
-                                            onLoginSuccess()
-                                        },
-                                        onFailure = { e ->
-                                            errorMessage = "登录失败: ${e.message}"
-                                        }
-                                    )
-                                } catch (e: Exception) {
-                                    errorMessage = "错误: ${e.message}"
-                                } finally {
-                                    isLoading = false
-                                }
-                            }
+                            doLogin()
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -361,6 +470,22 @@ fun LoginScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+
+                    if (oidcButton.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = { oidcUrl = oidcLoginUrl(serverAddress.trim()) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isLoading
+                        ) {
+                            Text(oidcButton, color = BrandPurple)
+                        }
+                    }
+                    TextButton(
+                        onClick = { showRegister = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("注册账号", color = TextSecondary)
+                    }
                 }
             }
 
@@ -384,5 +509,31 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
         }
+    }
+
+    // 明文 http 确认框：用户在服务器地址里显式输入了 http:// 才出现
+    pendingPlainHttp?.let { plainHost ->
+        AlertDialog(
+            onDismissRequest = { pendingPlainHttp = null },
+            title = { Text("使用不加密连接？", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("地址 \"$plainHost\" 使用 http:// 明文连接：登录密码和通信 token 将不经加密直接在网络上传输，可能被截获。仅建议在内网或自建服务器时使用。")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    pendingPlainHttp = null
+                    isLoading = true
+                    errorMessage = ""
+                    doLogin()
+                }) {
+                    Text("仍要使用 http")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPlainHttp = null }) {
+                    Text("改用 https（去掉 http:// 前缀）")
+                }
+            }
+        )
     }
 }

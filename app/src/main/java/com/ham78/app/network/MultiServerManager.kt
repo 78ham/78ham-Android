@@ -33,6 +33,10 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     private val _receivingState = MutableStateFlow(false)
     val receivingState: StateFlow<Boolean> = _receivingState.asStateFlow()
 
+    // 每台服务器同时只有一个人在说话。身份没变时不写这份状态，避免每个语音包都刷新界面
+    private val _liveSpeakers = MutableStateFlow<Map<String, LiveSpeaker>>(emptyMap())
+    val liveSpeakers: StateFlow<Map<String, LiveSpeaker>> = _liveSpeakers.asStateFlow()
+
     private val _playingVoiceClipId = MutableStateFlow<String?>(null)
     val playingVoiceClipId: StateFlow<String?> = _playingVoiceClipId.asStateFlow()
 
@@ -92,8 +96,8 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
     private val _activeServerId = MutableStateFlow("")
     val activeServerId: StateFlow<String> = _activeServerId.asStateFlow()
 
-    var onTextMessageReceived: ((serverId: String, callsign: String, ssid: Int, content: String, timestamp: String) -> Unit)? = null
-    var onVoiceReceived: ((serverId: String, callsign: String, ssid: Int, clipId: String, durationMs: Long) -> Unit)? = null
+    var onTextMessageReceived: ((serverId: String, callsign: String, ssid: Int, content: String, timestamp: String, devModel: Int, dmrId: Int) -> Unit)? = null
+    var onVoiceReceived: ((serverId: String, callsign: String, ssid: Int, clipId: String, durationMs: Long, devModel: Int, dmrId: Int, opus: Boolean, mdcLabel: String) -> Unit)? = null
 
     fun getActiveConnection(): ServerResources? {
         val activeId = _activeServerId.value
@@ -142,7 +146,13 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         }
         emitState()
 
-        val loginResult = ApiClient.login(config.host, config.username, config.password)
+        // 密码登录优先。OIDC 只留下 token，没有密码，用 token 直接取用户信息
+        val loginResult = if (config.password.isEmpty() && !config.authToken.isNullOrEmpty()) {
+            ApiClient.setTokenForServer(config.host, config.authToken)
+            ApiClient.getUserInfo(config.host)
+        } else {
+            ApiClient.login(config.host, config.username, config.password)
+        }
         return loginResult.fold(
             onSuccess = { userInfo ->
                 resources.loginToken = ApiClient.getTokenForServer(config.host)
@@ -153,6 +163,7 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                         isLoggedIn = true,
                         callsign = userInfo.callsign,
                         dmrId = userInfo.dmrId,
+                        userInfo = userInfo,
                         connectionState = ConnectionState.CONNECTING
                     )
                 }
@@ -234,6 +245,8 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
             try { res.audioManager.release() } catch (_: Exception) {}
         }
         connectionStates.remove(serverId)
+        // 连接已移除，其互斥锁无并发竞争者，直接回收避免 map 无界增长
+        connectMutexes.remove(serverId)
         emitState()
     }
 
@@ -248,7 +261,10 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         }
         connections.remove(serverId)
         connectionStates.remove(serverId)
+        // 连接已移除，其互斥锁无并发竞争者，直接回收避免 map 无界增长
+        connectMutexes.remove(serverId)
         _listenRooms.value = _listenRooms.value - serverId   // 断开的服务器不再有收听记录
+        clearLiveSpeaker(serverId)
 
         if (_activeServerId.value == serverId) {
             _activeServerId.value = connections.keys.firstOrNull() ?: ""
@@ -470,6 +486,12 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
         val voiceLock = Any()
         var sessionCallsign = ""
         var sessionSsid = 0
+        var sessionDevModel = 0
+        var sessionDmrId = 0
+        var sessionOpus = false
+        var sessionMdcLabel = ""
+        var sessionMdc: com.ham78.app.audio.Mdc1200Decoder? = null
+        var sessionDurationMs = 0L
         val sessionPcm = java.io.ByteArrayOutputStream()
         // 最后一个语音包时间戳；0 表示无进行中的会话
         val lastVoicePacketTime = java.util.concurrent.atomic.AtomicLong(0)
@@ -484,11 +506,22 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
             if (sessionCallsign.isEmpty()) return
             val callsign = sessionCallsign
             val ssid = sessionSsid
+            val devModel = sessionDevModel
+            val dmrId = sessionDmrId
+            val opus = sessionOpus
+            val mdcLabel = sessionMdcLabel
             val pcm = sessionPcm.toByteArray()
             sessionPcm.reset()
             sessionCallsign = ""
             sessionSsid = 0
+            sessionDevModel = 0
+            sessionDmrId = 0
+            sessionOpus = false
+            sessionMdcLabel = ""
+            sessionMdc = null
+            sessionDurationMs = 0
             lastVoicePacketTime.set(0)
+            clearLiveSpeaker(serverId)
 
             var clipId = ""
             var durationMs = 0L
@@ -497,7 +530,7 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                 com.ham78.app.audio.VoiceClipStore.put(clipId, pcm)
                 durationMs = com.ham78.app.audio.VoiceClipStore.durationMs(pcm)
             }
-            onVoiceReceived?.invoke(serverId, callsign, ssid, clipId, durationMs)
+            onVoiceReceived?.invoke(serverId, callsign, ssid, clipId, durationMs, devModel, dmrId, opus, mdcLabel)
         }
 
         // 静默超时监护：单一协程定期检查，替代原"每包取消并重启延迟协程"的防抖
@@ -532,6 +565,10 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                         }
 
                         // 解码已在锁外执行：Opus 解码较重，避免阻塞 flush 检查与会话拼接
+                        var shownDuration = 0L
+                        var shownDmr = 0
+                        var shownOpus = false
+                        var shownMdc = ""
                         synchronized(voiceLock) {
                             if (sessionCallsign.isNotEmpty() &&
                                 (packet.callSign != sessionCallsign || packet.ssid != sessionSsid)) {
@@ -540,10 +577,27 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                             if (sessionCallsign.isEmpty()) {
                                 sessionCallsign = packet.callSign
                                 sessionSsid = packet.ssid
+                                sessionDevModel = packet.devModel
+                                sessionOpus = packet.type == Nrl21Protocol.TYPE_OPUS
+                                sessionMdc = com.ham78.app.audio.Mdc1200Decoder()
+                                sessionDurationMs = 0
                             }
-                            pcm?.let { sessionPcm.write(it) }
+                            if (sessionDmrId == 0 && packet.dmrId != 0) sessionDmrId = packet.dmrId
+                            pcm?.let {
+                                sessionPcm.write(it)
+                                // 8kHz 16bit：每 16 字节是 1 毫秒。Opus 解出来也已降到 8kHz
+                                if (it.size >= 16) sessionDurationMs += it.size / 16
+                                // 信令多在开头或结尾，解出来就留在这次通话上
+                                val label = sessionMdc?.feedPcm16Le(it)
+                                if (!label.isNullOrEmpty()) sessionMdcLabel = label
+                            }
+                            shownDuration = sessionDurationMs
+                            shownDmr = sessionDmrId
+                            shownOpus = sessionOpus
+                            shownMdc = sessionMdcLabel
                         }
                         lastVoicePacketTime.set(System.currentTimeMillis())
+                        noteLiveSpeaker(serverId, packet, shownDuration, shownDmr, shownOpus, shownMdc)
                     }
                     Nrl21Protocol.TYPE_TEXT -> {
                         val textContent = Nrl21Protocol.TextContent.parse(packet.data)
@@ -564,7 +618,7 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                                     }
                                     onTextMessageReceived?.invoke(
                                         serverId, packet.callSign, packet.ssid,
-                                        "[loc]${textContent.body}", timestamp
+                                        "[loc]${textContent.body}", timestamp, packet.devModel, packet.dmrId
                                     )
                                 }
                             }
@@ -574,7 +628,9 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
                         val timestamp = synchronized(timestampFormat) {
                             timestampFormat.format(java.util.Date())
                         }
-                        onTextMessageReceived?.invoke(serverId, packet.callSign, packet.ssid, textContent.body, timestamp)
+                        onTextMessageReceived?.invoke(
+                            serverId, packet.callSign, packet.ssid, textContent.body, timestamp, packet.devModel, packet.dmrId
+                        )
                     }
                 }
             }
@@ -607,21 +663,76 @@ class MultiServerManager(private val audioManagerFactory: (UdpClient) -> AudioMa
             val deviceResult = ApiClient.getDevice(serverHost, userInfo.callsign, ssid)
             deviceResult.getOrNull()?.let { device ->
                 resources.deviceData = device
-                if (device.groupId > 0) {
+                // 0 号是公共大厅，同样有在线名单。只听的房间不在这里轮询
+                updateState(serverId) {
+                    it.copy(currentRoomId = device.groupId, deviceData = device)
+                }
+                val groupResult = ApiClient.getGroup(serverHost, device.groupId)
+                groupResult.getOrNull()?.let { group ->
+                    val devices = group.devmap.values
+                        .filter { it.isOnline }
+                        .map { OnlineDevice(it.callsign, it.ssid, it.devModel, it.dmrId) }
+                        .sortedBy { it.callsign }
                     updateState(serverId) {
-                        it.copy(currentRoomId = device.groupId, deviceData = device)
+                        it.copy(
+                            onlineCount = group.onlineCount,
+                            currentGroupName = group.name.ifEmpty { if (device.groupId == 0) "公共大厅" else "" },
+                            onlineDevices = devices
+                        )
                     }
-                    val groupResult = ApiClient.getGroup(serverHost, device.groupId)
-                    groupResult.getOrNull()?.let { group ->
-                        updateState(serverId) {
-                            it.copy(onlineCount = group.onlineCount, currentGroupName = group.name)
-                        }
-                        emitState()
-                    }
+                    emitState()
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Refresh failed for $serverId: ${e.message}")
+        }
+    }
+
+    // 同一个人连续说话时，时长最多 200ms 推一次界面。语音包每秒几十个，不能每个都刷
+    private val speakerUiAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * 语音包里的呼号和设备型号就是正在说话的人。
+     * 自己的回声不算。时长用已经解码的 PCM 累计，语音条按这个变长。
+     */
+    private fun noteLiveSpeaker(
+        serverId: String,
+        packet: Nrl21Protocol.Packet,
+        durationMs: Long,
+        dmrId: Int,
+        opus: Boolean,
+        mdcLabel: String
+    ) {
+        val mine = connectionStates[serverId] ?: return
+        if (packet.callSign.equals(mine.callsign, ignoreCase = true) && packet.ssid == mine.ssid) return
+        val roomId = _listenRooms.value[serverId] ?: mine.currentRoomId
+        val now = System.currentTimeMillis()
+        _liveSpeakers.update { current ->
+            val prev = current[serverId]
+            val same = prev != null &&
+                prev.callsign == packet.callSign &&
+                prev.ssid == packet.ssid &&
+                prev.roomId == roomId &&
+                prev.devModel == packet.devModel &&
+                prev.opus == opus &&
+                prev.dmrId == dmrId &&
+                prev.mdcLabel == mdcLabel
+            if (same && now - (speakerUiAt[serverId] ?: 0L) < 200L) {
+                current
+            } else {
+                speakerUiAt[serverId] = now
+                current + (serverId to LiveSpeaker(
+                    serverId, roomId, packet.callSign, packet.ssid, packet.devModel,
+                    durationMs, opus, dmrId, mdcLabel
+                ))
+            }
+        }
+    }
+
+    private fun clearLiveSpeaker(serverId: String) {
+        speakerUiAt.remove(serverId)
+        _liveSpeakers.update { current ->
+            if (serverId !in current) current else current - serverId
         }
     }
 
